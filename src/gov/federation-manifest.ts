@@ -65,18 +65,109 @@ export function crQueue(db: Database): CrRow[] {
 		.all() as CrRow[];
 }
 
-/** Hub-side CR origination seam (W160 wires the origins — belt originates
- *  LLM-policy CRs, central suspenders work-graph CRs). Idempotent on id. */
-export function declareCR(
-	db: Database,
-	spec: { id: string; action: string; target: string },
-): CrRow {
+/** W160 CR origination: who/what declared, when (declared_at). system names
+ *  the originate side — belt (LLM-policy) or suspenders (work-graph/rules). */
+export interface CrOrigin {
+	system: string;
+	actor: string;
+}
+
+export interface CrSpec {
+	id: string;
+	action: string;
+	target: string;
+	/** The change the spoke must reconcile (JSON-serializable). */
+	payload?: unknown;
+	/** Required: origination record (who declared, on whose behalf). */
+	origin: CrOrigin;
+}
+
+export type CrDeclare =
+	| { ok: true; row: CrRow }
+	| { ok: false; code: string; why: string };
+
+/** The domain-separation guard, structural (owner law: the CR channel NEVER
+ *  carries private-domain content). Deep-walks a declared CR's payload and
+ *  origin for W154 provenance markers — any `data_domain: "private"` anywhere
+ *  rejects the declare — and returns the offending path, or null when clean.
+ *  `data_domain: "hub"` and absence pass. */
+export function crPrivateDomainPath(value: unknown, path = "$"): string | null {
+	if (Array.isArray(value)) {
+		for (let i = 0; i < value.length; i++) {
+			const hit = crPrivateDomainPath(value[i], `${path}[${String(i)}]`);
+			if (hit !== null) return hit;
+		}
+		return null;
+	}
+	if (value !== null && typeof value === "object") {
+		for (const [k, v] of Object.entries(value)) {
+			const child = `${path}.${k}`;
+			if (k === "data_domain" && v === "private") return child;
+			const hit = crPrivateDomainPath(v, child);
+			if (hit !== null) return hit;
+		}
+	}
+	return null;
+}
+
+/** Declare-time validation: body shape + required origin record + the
+ *  structural domain guard, before any row exists. */
+function crDeclareRejection(spec: CrSpec): CrDeclare | null {
+	if (typeof spec.id !== "string" || spec.id.length === 0)
+		return { ok: false, code: "buckle.cr_body", why: "missing id" };
+	if (typeof spec.action !== "string" || spec.action.length === 0)
+		return { ok: false, code: "buckle.cr_body", why: "missing action" };
+	if (typeof spec.target !== "string" || spec.target.length === 0)
+		return { ok: false, code: "buckle.cr_body", why: "missing target" };
+	if (
+		spec.origin === null ||
+		typeof spec.origin !== "object" ||
+		typeof spec.origin.system !== "string" ||
+		spec.origin.system.length === 0 ||
+		typeof spec.origin.actor !== "string" ||
+		spec.origin.actor.length === 0
+	)
+		return {
+			ok: false,
+			code: "buckle.cr_origin",
+			why: "origin required: {system, agent} — CRs record who/what declared them",
+		};
+	const hit =
+		crPrivateDomainPath(spec.payload) ?? crPrivateDomainPath(spec.origin);
+	if (hit !== null)
+		return {
+			ok: false,
+			code: "buckle.cr_private_domain",
+			why: `content at ${hit} is marked/derived data_domain=private — the CR channel never carries private-domain content (domain separation, federation doc)`,
+		};
+	return null;
+}
+
+/** Hub-side CR origination seam (W160): belt originates LLM-policy CRs,
+ *  central suspenders work-graph/rules CRs — same queue, same lifecycle.
+ *  Records the origin (who/what, declared_at); the structural domain guard
+ *  runs HERE, before any row exists. Idempotent on id. */
+export function declareCR(db: Database, spec: CrSpec): CrDeclare {
+	const rej = crDeclareRejection(spec);
+	if (rej !== null) return rej;
+	const payloadJson =
+		spec.payload === undefined ? null : JSON.stringify(spec.payload);
 	db.query(
-		"INSERT INTO federation_cr_queue (id, action, target, declared_at, state) VALUES (?, ?, ?, ?, 'declared') ON CONFLICT(id) DO NOTHING",
-	).run(spec.id, spec.action, spec.target, new Date().toISOString());
-	return db
-		.query("SELECT * FROM federation_cr_queue WHERE id = ?")
-		.get(spec.id) as CrRow;
+		"INSERT INTO federation_cr_queue (id, action, target, declared_at, state, payload, origin) VALUES (?, ?, ?, ?, 'declared', ?, ?) ON CONFLICT(id) DO NOTHING",
+	).run(
+		spec.id,
+		spec.action,
+		spec.target,
+		new Date().toISOString(),
+		payloadJson,
+		JSON.stringify(spec.origin),
+	);
+	return {
+		ok: true,
+		row: db
+			.query("SELECT * FROM federation_cr_queue WHERE id = ?")
+			.get(spec.id) as CrRow,
+	};
 }
 
 /** Linear lifecycle declared→delivered→applied→verified→reported-up, plus
@@ -98,14 +189,21 @@ function crLive(state: string): boolean {
 	return nextCrState(state) !== null;
 }
 
+/** W160: the hub-side verification probe. Before a CR may report `verified`,
+ *  the hub re-reads the CR's target surface to confirm the change actually
+ *  landed — spoke claims are never trusted alone. */
+export type CrProbe = (cr: CrRow) => { ok: boolean; why: string | null };
+
 /** Spoke-reported CR state transition, enforced server-side: only the
  *  lifecycle's next state (or failed-from-live) is accepted; 409-mapped
- *  rejection otherwise. Returns the fresh row for the response. */
+ *  rejection otherwise. applied→verified additionally requires the hub's
+ *  verification probe to pass. Returns the fresh row for the response. */
 export function transitionCR(
 	db: Database,
 	id: string,
 	to: string,
 	note: string | null,
+	probe?: CrProbe,
 ):
 	| { ok: true; row: CrRow }
 	| { ok: false; status: number; code: string; why: string } {
@@ -129,10 +227,34 @@ export function transitionCR(
 			why: `CR ${id} is '${current.state}'; expected '${String(allowed)}'${to === "failed" ? " or failed" : ""}`,
 		};
 	}
+	if (to === "verified" && current.state === "applied") {
+		if (probe === undefined)
+			return {
+				ok: false,
+				status: 409,
+				code: "buckle.cr_probe",
+				why: `CR ${id}: verified requires a hub verification probe; none registered for target '${current.target}'`,
+			};
+		const v = probe(current);
+		if (!v.ok)
+			return {
+				ok: false,
+				status: 409,
+				code: "buckle.cr_probe",
+				why: `CR ${id}: verification probe failed — ${v.why ?? "target not confirmed"}`,
+			};
+	}
 	const ts = Date.now();
 	db.query(
-		"UPDATE federation_cr_queue SET state = ?, note = ?, updated_at = ?, reported_at = ? WHERE id = ?",
-	).run(to, note, ts, to === "reported-up" ? ts : current.reported_at, id);
+		"UPDATE federation_cr_queue SET state = ?, note = ?, updated_at = ?, reported_at = ?, verified_at = ? WHERE id = ?",
+	).run(
+		to,
+		note,
+		ts,
+		to === "reported-up" ? ts : current.reported_at,
+		to === "verified" ? ts : current.verified_at,
+		id,
+	);
 	return {
 		ok: true,
 		row: db

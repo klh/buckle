@@ -277,7 +277,13 @@ export class Governance {
 			});
 			return authError(auth.status, auth.code, auth.why);
 		}
-		const needed = scopeNeeded("spoke", req.method);
+		// W160 domain split at the gate: the CR-declare/list surface
+		// (/federation/cr, exact) is HUB-ADMIN — spokes report status on
+		// /federation/cr/:id/status and never hold the originate capability.
+		const needed =
+			path === "/federation/cr"
+				? scopeNeeded("admin", req.method)
+				: scopeNeeded("spoke", req.method);
 		if (!hasScope(auth.principal.scopes, needed))
 			return authError(403, "buckle.insufficient_scope", `requires ${needed}`);
 		stashPrincipal(req, auth.principal);

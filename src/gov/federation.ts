@@ -5,23 +5,31 @@
 // buckle:spoke:WRITE_. Visibility law: spoke-private models never appear —
 // structural (hub cannot see them) + defensive `visibility: spoke-private`.
 import { Database } from "bun:sqlite";
+import { YAML } from "bun";
 import type { GatewayPolicy } from "../policy.ts";
 import type { UpstreamPool } from "../upstreams.ts";
+import { readFileSync } from "node:fs";
 import { buildModels } from "./federation-entitlements.ts";
 import {
 	buildRules,
 	crQueue,
+	declareCR,
+	type CrProbe,
 	type FedManifest,
 	manifestVersion,
 	transitionCR,
 } from "./federation-manifest.ts";
 import { applyGovernanceSchema } from "./schema.ts";
 import { authError, type Principal } from "./middleware.ts";
+import { hasScope } from "./scopes.ts";
 
 export interface FederationOpts {
 	dbPath: string;
 	policy: GatewayPolicy;
 	pool: UpstreamPool;
+	/** W160: the routing-policy.yaml path — the verification probe re-reads
+	 *  this surface from disk before a CR may report `verified`. */
+	policyPath?: string;
 }
 
 export interface CrRow {
@@ -33,6 +41,10 @@ export interface CrRow {
 	note: string | null;
 	updated_at: number | null;
 	reported_at: number | null;
+	/** W160: the declared change (JSON) + origination record (JSON). */
+	payload: string | null;
+	origin: string | null;
+	verified_at: number | null;
 }
 
 /** The principal a gate-authenticated request carries (WeakMap stash — no
@@ -55,10 +67,47 @@ function bad(status: number, code: string, why: string): Response {
 	);
 }
 
+function str(v: unknown): string | null {
+	return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/** W160: the built-in policy-revision probe — RE-READS routing-policy.yaml
+ *  from disk at verify time (the hub re-reads the target surface; a spoke's
+ *  word alone never grants `verified`). Registered for `policy@N` and
+ *  `routing-policy@N` targets (longest-prefix match). */
+function policyRevisionProbe(policyPath: string | undefined): CrProbe {
+	return (cr: CrRow): { ok: boolean; why: string | null } => {
+		const m = /@(\d+)$/.exec(cr.target);
+		if (m === null)
+			return { ok: false, why: `no revision in target '${cr.target}'` };
+		const want = Number(m[1]);
+		if (policyPath === undefined)
+			return { ok: false, why: "no policy surface wired on this hub" };
+		let have = 0;
+		try {
+			// doc-level `version` — parsePolicy keeps only the gateway block
+			const doc = YAML.parse(readFileSync(policyPath, "utf8")) as {
+				version?: number;
+			} | null;
+			have = doc?.version ?? 0;
+		} catch (e) {
+			return { ok: false, why: `policy surface unreadable: ${String(e)}` };
+		}
+		return have >= want
+			? { ok: true, why: null }
+			: {
+					ok: false,
+					why: `hub policy revision ${String(have)} < CR target ${String(want)}`,
+				};
+	};
+}
+
 export class Federation {
 	readonly db: Database;
 	private readonly policy: GatewayPolicy;
 	private readonly pool: UpstreamPool;
+	/** W160 verification probes, by target prefix (longest match wins). */
+	private readonly probes = new Map<string, CrProbe>();
 
 	constructor(opts: FederationOpts) {
 		this.db = new Database(opts.dbPath, { create: true });
@@ -66,6 +115,33 @@ export class Federation {
 		applyGovernanceSchema(this.db);
 		this.policy = opts.policy;
 		this.pool = opts.pool;
+		const rev = policyRevisionProbe(opts.policyPath);
+		this.registerProbe("policy@", rev);
+		this.registerProbe("routing-policy@", rev);
+	}
+
+	/** Register a verification probe for targets with the given prefix. */
+	registerProbe(prefix: string, probe: CrProbe): void {
+		this.probes.set(prefix, probe);
+	}
+
+	/** Run the probe matching this CR's target (longest registered prefix);
+	 *  no match = honest failure — verified is never granted on faith. */
+	private runProbe(cr: CrRow): { ok: boolean; why: string | null } {
+		let best: string | null = null;
+		for (const prefix of this.probes.keys()) {
+			if (!cr.target.startsWith(prefix)) continue;
+			if (best === null || prefix.length > best.length) best = prefix;
+		}
+		if (best === null)
+			return {
+				ok: false,
+				why: `no verification probe registered for target '${cr.target}'`,
+			};
+		const probe = this.probes.get(best);
+		if (probe === undefined)
+			return { ok: false, why: `probe gap for '${cr.target}'` };
+		return probe(cr);
 	}
 
 	/** The manifest payload: content-addressed version + rules + CR queue. */
@@ -110,6 +186,10 @@ export class Federation {
 			return Response.json(this.manifest());
 		if (req.method === "GET" && url.pathname === "/federation/entitlements")
 			return Response.json(this.entitlements(p));
+		if (req.method === "POST" && url.pathname === "/federation/cr")
+			return this.crDeclare(req, p);
+		if (req.method === "GET" && url.pathname === "/federation/cr")
+			return this.crList(p);
 		const cr = /^\/federation\/cr\/([^/]+)\/status$/.exec(url.pathname);
 		if (req.method === "POST" && cr !== null)
 			return this.crStatus(req, decodeURIComponent(cr[1] ?? ""), p);
@@ -133,13 +213,119 @@ export class Federation {
 		if (body === null) return bad(400, "buckle.bad_body", "invalid JSON body");
 		const state = typeof body.state === "string" ? body.state : "";
 		const note = typeof body.note === "string" ? body.note : null;
-		const out = transitionCR(this.db, id, state, note);
+		const out = transitionCR(this.db, id, state, note, (cr) =>
+			this.runProbe(cr),
+		);
 		if (!out.ok) return bad(out.status, out.code, out.why);
 		return Response.json({
 			id,
 			state: out.row.state,
 			reported_at: out.row.reported_at,
 		});
+	}
+
+	/** W160 CR declare guard: HUB-ADMIN-ONLY — buckle:admin:WRITE_ is demanded
+	 *  at the gate AND here; the re-check is the structural
+	 *  spoke-cannot-declare guard. Returns the rejection or null. */
+	private crDeclareGuard(p: Principal | null): Response | null {
+		if (p === null)
+			return authError(401, "buckle.auth_missing", "missing bearer token");
+		if (!hasScope(p.scopes, "buckle:admin:WRITE_"))
+			return authError(
+				403,
+				"buckle.insufficient_scope",
+				"declaring CRs requires buckle:admin:WRITE_ (hub-admin capability; spokes report status only)",
+			);
+		return null;
+	}
+
+	/** W160 CR declare: guard (401/403) → body → seam; 422 private-domain. */
+	private async crDeclare(
+		req: Request,
+		p: Principal | null,
+	): Promise<Response> {
+		const guard = this.crDeclareGuard(p);
+		if (guard !== null) return guard;
+		const body = (await req.json().catch(() => null)) as Record<
+			string,
+			unknown
+		> | null;
+		if (body === null) return bad(400, "buckle.bad_body", "invalid JSON body");
+		const action = str(body.action);
+		const target = str(body.target);
+		if (action === null || target === null)
+			return bad(400, "buckle.bad_body", "action and target are required");
+		const id =
+			str(body.id) ??
+			`cr-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+		const o = body.origin as Record<string, unknown> | null | undefined;
+		const hasOrigin = o !== null && typeof o === "object" && !Array.isArray(o);
+		const out = declareCR(this.db, {
+			id,
+			action,
+			target,
+			payload: body.payload,
+			origin: {
+				system:
+					(hasOrigin && typeof o.system === "string" ? o.system : null) ??
+					"belt",
+				actor:
+					(hasOrigin && typeof o.actor === "string" ? o.actor : null) ??
+					p?.actor ??
+					p?.keyId ??
+					"unknown",
+				// pass the declared origin through VERBATIM so the structural
+				// domain guard sees private markers carried on it too
+				...(hasOrigin ? o : {}),
+			} as { system: string; actor: string },
+		});
+		if (!out.ok)
+			return bad(
+				out.code === "buckle.cr_private_domain" ? 422 : 400,
+				out.code,
+				out.why,
+			);
+		return Response.json(this.crOut(out.row), { status: 201 });
+	}
+
+	/** W160 CR list: hub-admin read (buckle:admin:READ_; WRITE_ implies). */
+	private crList(p: Principal | null): Response {
+		if (p === null)
+			return authError(401, "buckle.auth_missing", "missing bearer token");
+		if (!hasScope(p.scopes, "buckle:admin:READ_"))
+			return authError(
+				403,
+				"buckle.insufficient_scope",
+				"requires buckle:admin:READ_",
+			);
+		return Response.json({
+			cr_queue: crQueue(this.db).map((r) => this.crOut(r)),
+		});
+	}
+
+	/** Wire-format row: payload/origin storage JSON → objects. */
+	private crOut(r: CrRow): Record<string, unknown> {
+		const parse = (s: string | null): unknown => {
+			if (s === null) return null;
+			try {
+				return JSON.parse(s) as unknown;
+			} catch {
+				return s;
+			}
+		};
+		return {
+			id: r.id,
+			action: r.action,
+			target: r.target,
+			declared_at: r.declared_at,
+			state: r.state,
+			note: r.note,
+			payload: parse(r.payload),
+			origin: parse(r.origin),
+			updated_at: r.updated_at,
+			reported_at: r.reported_at,
+			verified_at: r.verified_at,
+		};
 	}
 
 	/** 404 envelope in the admin API's shape. */

@@ -105,7 +105,7 @@ export function buildDeps(
 				.inc({ tier }),
 	};
 	const router = new Router(policy, { pool, metrics, cooldowns });
-	// W143 speed pass: the warm-rate gate servicemon counter + the boot
+	// W143 speed pass: the warm-rate gate's servicemon counter + the boot
 	// pre-warm — one GET /v1/models per unique deployment origin (the
 	// gateway-config.ts precedent), so TLS/auth are established before the
 	// first real request. Failed origins stay cold and honestly count a
@@ -131,7 +131,12 @@ export function buildDeps(
 			prefs,
 		});
 	const dbPath = opts.dbPath ?? process.env.BUCKLE_DB ?? "buckle.db";
-	const federation = new Federation({ dbPath, policy, pool });
+	const federation = new Federation({
+		dbPath,
+		policy,
+		pool,
+		policyPath: opts.policyPath,
+	});
 	return {
 		router,
 		ledger,

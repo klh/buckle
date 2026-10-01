@@ -195,6 +195,7 @@ describe("federation: CR lifecycle (server-side transitions)", () => {
 			id: "cr-1",
 			action: "adopt-policy",
 			target: "routing-policy@1",
+			origin: { system: "belt", actor: "w154-test" },
 		});
 		const res = await fetch(`${fed.base}/federation/policy-manifest`);
 		const body = (await res.json()) as { cr_queue: CrEntry[] };
@@ -218,6 +219,7 @@ describe("federation: CR lifecycle (server-side transitions)", () => {
 			id: "cr-2",
 			action: "adopt-policy",
 			target: "policy@2",
+			origin: { system: "belt", actor: "w154-test" },
 		});
 		const key = await issueKey(fed.base, {
 			name: "spoke-w",

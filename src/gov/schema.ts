@@ -56,7 +56,10 @@ CREATE TABLE IF NOT EXISTS federation_cr_queue (
   state TEXT NOT NULL DEFAULT 'declared',
   note TEXT,
   updated_at INTEGER,
-  reported_at INTEGER
+  reported_at INTEGER,
+  payload TEXT,
+  origin TEXT,
+  verified_at INTEGER
 );
 `;
 
@@ -110,6 +113,9 @@ const DELTA_TABLES: Array<{ tbl: string; pk: string; cols: string[] }> = [
 			"note",
 			"updated_at",
 			"reported_at",
+			"payload",
+			"origin",
+			"verified_at",
 		],
 	},
 ];
@@ -145,6 +151,20 @@ export function applyGovernanceSchema(db: Database): void {
 		db.run("ALTER TABLE teams ADD COLUMN rpm_ceiling INTEGER");
 	if (!cols.includes("tpm_ceiling"))
 		db.run("ALTER TABLE teams ADD COLUMN tpm_ceiling INTEGER");
+	// W160 CR origination columns — same guarded ALTERs (W154-era DBs heal)
+	const crCols = (
+		db
+			.query("SELECT name FROM pragma_table_info('federation_cr_queue')")
+			.all() as Array<{
+			name: string;
+		}>
+	).map((r) => r.name);
+	if (!crCols.includes("payload"))
+		db.run("ALTER TABLE federation_cr_queue ADD COLUMN payload TEXT");
+	if (!crCols.includes("origin"))
+		db.run("ALTER TABLE federation_cr_queue ADD COLUMN origin TEXT");
+	if (!crCols.includes("verified_at"))
+		db.run("ALTER TABLE federation_cr_queue ADD COLUMN verified_at INTEGER");
 	// the deltas mirror — guarded CREATEs, self-healing on every open
 	for (const { tbl, pk, cols } of DELTA_TABLES)
 		for (const op of ["insert", "update", "delete"] as const)
