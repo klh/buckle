@@ -1,48 +1,29 @@
-// src/wire.ts — upstream request construction. The request body is the one
-// thing the router rewrites (model alias patch + stream_options injection);
-// responses are never re-serialized (see handlers.ts). Semantics ported from
-// LiteLLM 1.103.0 (MIT): stream_options.include_usage injected toward
-// openai-dialect upstreams so usage arrives on the terminal chunk — the
-// caller-visible effect is what include_usage controls, and the router's
-// usage accounting must not depend on what the caller asked for.
+// src/wire.ts — upstream request construction, now through the adapter
+// registry (W134 §4.1): the deployment's family adapter builds the wire
+// call (model alias patch + dialect patches + auth); responses are never
+// re-serialized (see handlers.ts). The openai-compat adapter reproduces
+// the pre-adapter body byte-for-byte (model patch + stream_options
+// .include_usage injection; LiteLLM streaming_handler.py semantics, MIT) —
+// the 37-test regression net pins the bytes.
+import { resolveAdapter } from "./adapters/index.ts";
 import type { Deployment } from "./upstreams.ts";
 import type { UpstreamRequest } from "./router.ts";
 
-/** The rewritten upstream body for a candidate deployment. */
-export function buildUpstreamBody(
-	dep: Deployment,
-	req: UpstreamRequest,
-): Record<string, unknown> {
-	const body: Record<string, unknown> = {
-		...req.body,
-		model: dep.model ?? req.body.model,
-	};
-	if (dep.dialect === "openai" && body.stream === true) {
-		const prior = (body.stream_options ?? {}) as Record<string, unknown>;
-		body.stream_options = { ...prior, include_usage: true };
-	}
-	return body;
-}
-
-/** Default upstream transport: fetch with timeout + caller-signal abort. */
-export function defaultFetch(
+/** Default upstream transport: adapter-built wire call + fetch with
+ *  timeout + caller-signal abort. */
+export async function defaultFetch(
 	dep: Deployment,
 	req: UpstreamRequest,
 	timeoutMs: number,
 ): Promise<Response> {
-	const headers: Record<string, string> = {
-		"content-type": "application/json",
-	};
-	if (dep.api_key_env) {
-		const token = process.env[dep.api_key_env];
-		if (token) headers.authorization = `Bearer ${token}`;
-	}
+	const adapter = resolveAdapter(dep);
+	const wire = await adapter.buildCall(dep, req, req.body);
 	const signals: AbortSignal[] = [AbortSignal.timeout(timeoutMs)];
 	if (req.signal) signals.push(req.signal);
-	return fetch(new URL(req.path, dep.url), {
+	return fetch(wire.url, {
 		method: "POST",
-		headers,
-		body: JSON.stringify(buildUpstreamBody(dep, req)),
+		headers: wire.headers,
+		body: wire.body,
 		signal: AbortSignal.any(signals),
 	});
 }

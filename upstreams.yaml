@@ -15,14 +15,19 @@ groups:
   glm-5.3-flash:
     - url: http://127.0.0.1:8902
       dialect: openai
+      adapter: openai-compat # W134 §4.2: per-deployment family; absent = derived from dialect
   local-swarm:
     - url: http://127.0.0.1:8902
       dialect: openai
+      adapter: openai-compat
     - url: http://127.0.0.1:8901
       dialect: openai
+      adapter: openai-compat
     - url: http://127.0.0.1:8903
       dialect: openai
+      adapter: openai-compat
     - url: http://127.0.0.1:8906
       dialect: openai
+      adapter: openai-compat
   gpt-5.2: [] # dormant — activation is a BUCKLE_UPSTREAMS override, never a committed key
   claude-sonnet-5: [] # dormant — same

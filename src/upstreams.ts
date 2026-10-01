@@ -6,6 +6,8 @@
 // request time.
 import { YAML } from "bun";
 import { existsSync, readFileSync } from "node:fs";
+import { resolveAdapter } from "./adapters/index.ts";
+import { deriveAdapter, type AdapterFamily } from "./adapters/types.ts";
 
 export type Dialect = "openai" | "anthropic";
 
@@ -18,6 +20,11 @@ export interface Deployment {
 	model?: string;
 	// env var name holding the bearer token (never the token itself)
 	api_key_env?: string;
+	// per-DEPLOYMENT wire family (W134 §4.2): absent = derived from the
+	// dialect; a group may mix families.
+	adapter?: AdapterFamily;
+	// family parameters (region, project, api-version) — never secrets
+	adapter_config?: Record<string, unknown>;
 	group: string;
 }
 
@@ -31,6 +38,8 @@ interface DeploymentSpec {
 	dialect: Dialect;
 	model?: string;
 	api_key_env?: string;
+	adapter?: AdapterFamily;
+	adapter_config?: Record<string, unknown>;
 }
 
 export interface UpstreamPool {
@@ -64,7 +73,21 @@ function poolFrom(doc: UpstreamsDoc): UpstreamPool {
 	for (const [group, specs] of Object.entries(doc.groups)) {
 		groups.set(
 			group,
-			(specs ?? []).map((s) => ({ ...s, group })),
+			(specs ?? []).map((s) => {
+				const dep = { ...s, group };
+				// startup fatal (W134 §4.2): unknown adapter names — and known
+				// tier-2 families with no adapter yet — fail closed here,
+				// naming the offending group, never a silent passthrough.
+				if (dep.adapter === undefined) dep.adapter = deriveAdapter(dep.dialect);
+				try {
+					resolveAdapter(dep);
+				} catch (e) {
+					throw new Error(
+						`upstreams: group "${group}": ${e instanceof Error ? e.message : String(e)}`,
+					);
+				}
+				return dep;
+			}),
 		);
 	}
 	return {
