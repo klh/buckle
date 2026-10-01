@@ -3,9 +3,14 @@
 // — flag, env, or code — until the owner flips it deliberately. Wires the
 // W124 policy file, the upstream pool, the usage ledger, the router and the
 // W125 servicemon standard (GET /status, GET /metrics) into one process.
+import { CandidateTable } from "./candidates.ts";
+import { Cooldowns } from "./cooldown.ts";
+import { decideRoute } from "./decide.ts";
+import type { RouteHint } from "./hints.ts";
 import { createApp, type AppDeps } from "./handlers.ts";
+import type { Dialect } from "./upstreams.ts";
 import { Ledger } from "./ledger.ts";
-import { loadGatewayPolicy } from "./policy.ts";
+import { loadGatewayPolicy, loadPrefs } from "./policy.ts";
 import { Router, type RouterMetrics } from "./router.ts";
 import { servicemon } from "./servicemon.ts";
 import { loadUpstreams } from "./upstreams.ts";
@@ -19,6 +24,7 @@ export interface ServerOpts {
 	dbPath?: string;
 	policyPath?: string;
 	upstreamsPath?: string;
+	prefsPath?: string;
 }
 
 /** Port resolution with the 4100 guard; explicit arg wins over env. */
@@ -46,10 +52,17 @@ export function buildDeps(
 ): AppDeps & { router: Router } {
 	const policy = loadGatewayPolicy(opts.policyPath);
 	const pool = loadUpstreams(opts.upstreamsPath);
+	const prefs = loadPrefs(opts.prefsPath);
 	const ledger = new Ledger(
 		opts.dbPath ?? process.env.BUCKLE_DB ?? "buckle.db",
 	);
 	const sm = servicemon({ service: "buckle", port });
+	const cooldowns = new Cooldowns(
+		policy.allowed_fails ?? 3,
+		policy.cooldown_time ?? 30,
+	);
+	const table = new CandidateTable({ pool, policy, cooldowns });
+	table.start();
 	const metrics: RouterMetrics = {
 		fallback: (tier) =>
 			sm
@@ -73,8 +86,19 @@ export function buildDeps(
 				)
 				.inc({ tier }),
 	};
-	const router = new Router(policy, { pool, metrics });
-	return { router, ledger, sm, pool };
+	const router = new Router(policy, { pool, metrics, cooldowns });
+	const decide = (input: {
+		group: string;
+		dialect: Dialect;
+		hint: RouteHint | null;
+		hintRaw: string;
+	}) =>
+		decideRoute({
+			...input,
+			candidates: table.snapshot(),
+			prefs,
+		});
+	return { router, ledger, sm, pool, decide, table };
 }
 
 /** Start buckle on the shadow port. Returns the Bun server for tests. */

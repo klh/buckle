@@ -13,11 +13,21 @@
 import { YAML } from "bun";
 import { existsSync, readFileSync } from "node:fs";
 
+/** OWNER DIRECTIVE (W124, lesson.fanout-rate-budget): flashx appears in no
+ *  group, no ladder, no alias — same upstream family saturates together and
+ *  the tier is too expensive. Enforced structurally: the ladder walk refuses
+ *  flashx tiers and the candidate table never builds flashx rows. */
+export const FLASHX = /flashx/i;
+
 export interface GatewayPolicy {
 	num_retries?: number;
 	allowed_fails?: number;
 	cooldown_time?: number;
 	fallbacks?: Record<string, string[]>;
+	// W136 routing laws §3.2: per-group capability tags — the string the hint
+	// tag cloud regexps against. Operators edit the YAML, never code; absent
+	// tags contribute no text (the file stays v1-compatible).
+	tags?: Record<string, string[]>;
 	// buckle extension knobs (belt ignores unknown keys — shared file stays
 	// compatible): backoff cap for absent retry-after, per-attempt timeout.
 	retry_max_delay_s?: number;
@@ -27,11 +37,15 @@ export interface GatewayPolicy {
 interface PolicyDoc {
 	version?: number;
 	gateway?: GatewayPolicy;
+	tags?: Record<string, string[]>;
 }
 
 /** Native-free defaults; the committed YAML carries the same values. */
 export const POLICY_DEFAULTS: Required<
-	Omit<GatewayPolicy, "fallbacks" | "retry_max_delay_s" | "request_timeout_s">
+	Omit<
+		GatewayPolicy,
+		"fallbacks" | "tags" | "retry_max_delay_s" | "request_timeout_s"
+	>
 > & {
 	retry_max_delay_s: number;
 	request_timeout_s: number;
@@ -43,11 +57,11 @@ export const POLICY_DEFAULTS: Required<
 	request_timeout_s: 120,
 };
 
-/** Parse a policy document (tests + loader share this path). */
+/** Parse a policy file: gateway knobs + the W136 tags block. */
 export function parsePolicy(text: string): GatewayPolicy {
 	const doc = YAML.parse(text) as PolicyDoc | null;
 	const gateway = doc?.gateway ?? {};
-	return { ...POLICY_DEFAULTS, ...gateway };
+	return { ...POLICY_DEFAULTS, ...gateway, tags: doc?.tags ?? {} };
 }
 
 /** Resolution order: explicit path → BUCKLE_POLICY → BELT_POLICY → runtime
@@ -67,4 +81,40 @@ export function loadGatewayPolicy(explicitPath?: string): GatewayPolicy {
 	throw new Error(
 		"policy: no routing-policy.yaml (BUCKLE_POLICY/BELT_POLICY, ~/.claude/local-llm/, repo root)",
 	);
+}
+
+// ─── prefs: allow_cloud / cost_speed, the owner's escalation switches ───
+// Belt's prefs.json (bin/router-shim.ts) is the file this machine already
+// runs; defaults are conservative: cloud off, balanced.
+export interface Prefs {
+	cost_speed: "balanced" | "cost" | "speed" | "quality";
+	allow_cloud: boolean;
+}
+
+export const PREFS_DEFAULTS: Prefs = {
+	cost_speed: "balanced",
+	allow_cloud: false,
+};
+
+/** Prefs resolution: explicit path → BUCKLE_PREFS → the belt prefs file.
+ *  Missing/unreadable file → defaults (loading never throws). */
+export function loadPrefs(explicitPath?: string): Prefs {
+	const p =
+		explicitPath ??
+		process.env.BUCKLE_PREFS ??
+		`${process.env.HOME}/.claude/local-llm/prefs.json`;
+	try {
+		const doc = JSON.parse(readFileSync(p, "utf8")) as Partial<Prefs>;
+		const cs = doc.cost_speed;
+		return {
+			cost_speed:
+				cs !== undefined &&
+				(["balanced", "cost", "speed", "quality"] as const).includes(cs)
+					? cs
+					: PREFS_DEFAULTS.cost_speed,
+			allow_cloud: doc.allow_cloud === true,
+		} satisfies Prefs;
+	} catch {
+		return { ...PREFS_DEFAULTS };
+	}
 }

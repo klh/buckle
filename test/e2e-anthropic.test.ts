@@ -2,24 +2,12 @@
 // identity + message_start/message_delta usage tee + ledger.
 import { describe, expect, test } from "bun:test";
 import { startMockUpstream } from "./mock.ts";
+import { testDeps } from "./deps.ts";
 import { createApp, type AppDeps } from "../src/handlers.ts";
-import { Ledger } from "../src/ledger.ts";
-import type { GatewayPolicy } from "../src/policy.ts";
-import { Router } from "../src/router.ts";
-import { servicemon } from "../src/servicemon.ts";
 import type { UpstreamPool } from "../src/upstreams.ts";
 
-const POLICY: GatewayPolicy = {
-	num_retries: 1,
-	allowed_fails: 3,
-	cooldown_time: 30,
-};
-
 function deps(pool: UpstreamPool): AppDeps {
-	const ledger = new Ledger(":memory:");
-	const sm = servicemon({ service: "buckle-test", port: 0 });
-	const router = new Router(POLICY, { pool });
-	return { router, ledger, sm, pool };
+	return testDeps(pool);
 }
 
 function poolOf(url: string): UpstreamPool {

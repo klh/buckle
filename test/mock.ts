@@ -22,10 +22,11 @@ type Handler = (
 
 export async function startMockUpstream(
 	handler: Handler,
+	opts?: { hostname?: string },
 ): Promise<MockUpstream> {
 	const calls: MockCall[] = [];
 	const server = Bun.serve({
-		hostname: "127.0.0.1",
+		hostname: opts?.hostname ?? "127.0.0.1",
 		port: 0,
 		async fetch(req) {
 			const body = (await req.json().catch(() => null)) as Record<

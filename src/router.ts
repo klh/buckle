@@ -8,16 +8,19 @@
 // 2**attempt + U[0,1) jitter when absent). Owner directive enforced
 // structurally: flashx tiers are refused in every ladder walk.
 import { Cooldowns, retryAfterS, retryDelayS } from "./cooldown.ts";
-import type { GatewayPolicy } from "./policy.ts";
+import { candIdOf, type CandidateRow } from "./candidates.ts";
+import { mayEscalate, type RouteSelection } from "./decide.ts";
+import { FLASHX, type GatewayPolicy } from "./policy.ts";
 import type { Dialect, Deployment, UpstreamPool } from "./upstreams.ts";
 
-export const FLASHX = /flashx/i;
+export { FLASHX };
 
 export type ExecuteResult =
 	| {
 			kind: "upstream";
 			response: Response;
 			deployment: Deployment;
+			candidateId: string; // delivered candidate (W136 audit join)
 			tier: string;
 			attempts: number;
 			stream: boolean;
@@ -45,6 +48,12 @@ export interface UpstreamRequest {
 	body: Record<string, unknown>;
 	key: string;
 	signal?: AbortSignal;
+	// W140 routing laws: the pure decision result (handlers decided via the
+	// candidate table before dispatch) + the complexity tier + the raw hint,
+	// threaded for the escalation gate and audit echo.
+	sel?: RouteSelection;
+	tier?: string;
+	hintRaw?: string;
 }
 
 export interface RouterMetrics {
@@ -79,6 +88,9 @@ export class UpstreamError extends Error {
 
 export interface RouterDeps {
 	pool: UpstreamPool;
+	// shared ejection state — the candidate table reads the same instance so
+	// cooldown-benched deployments go unhealthy in the decision view
+	cooldowns?: Cooldowns;
 	now?: () => number;
 	rng?: () => number;
 	sleepMs?: (ms: number) => Promise<void>;
@@ -106,11 +118,13 @@ export class Router {
 		private readonly policy: GatewayPolicy,
 		private readonly deps: RouterDeps,
 	) {
-		this.cooldowns = new Cooldowns(
-			policy.allowed_fails ?? 3,
-			policy.cooldown_time ?? 30,
-			deps.now,
-		);
+		this.cooldowns =
+			deps.cooldowns ??
+			new Cooldowns(
+				policy.allowed_fails ?? 3,
+				policy.cooldown_time ?? 30,
+				deps.now,
+			);
 		this.now = deps.now ?? Date.now;
 		this.rng = deps.rng ?? Math.random;
 		this.sleepMs =
@@ -193,6 +207,7 @@ export class Router {
 					kind: "upstream",
 					response: r.response,
 					deployment: dep,
+					candidateId: candIdOf(dep),
 					tier,
 					attempts: st.attempts,
 					stream: req.body.stream === true,
@@ -222,6 +237,12 @@ export class Router {
 	 *  override) are skipped as skip-not-failure. */
 	async execute(req: UpstreamRequest): Promise<ExecuteResult> {
 		if (req.signal?.aborted) return { kind: "aborted" };
+		if (req.sel)
+			return this.walkSelected(req, {
+				attempts: 0,
+				status: 502,
+				error: `no healthy upstream for ${req.group}`,
+			});
 		const st = {
 			attempts: 0,
 			status: 502,
@@ -234,6 +255,81 @@ export class Router {
 				continue;
 			}
 			const candidates = this.tierCandidates(tier, req);
+			if (candidates.length === 0) continue;
+			if (tier !== req.group) this.metrics?.fallback(tier);
+			const r = await this.attemptTier(req, tier, candidates, st);
+			if (r !== null) return r;
+		}
+		return { kind: "exhausted", ...st };
+	}
+
+	/** W140 selection walk: deliver the selected candidate first, then the
+	 *  policy ladder as the failure domain. must (full fit) keeps its domain
+	 *  closed — ladder rungs would substitute beyond the hint (law 2). */
+	private async walkSelected(
+		req: UpstreamRequest,
+		st: { attempts: number; status: number; error: string },
+	): Promise<ExecuteResult> {
+		const sel = req.sel;
+		if (!sel) return { kind: "exhausted", ...st }; // unreachable (guarded)
+		const tried = new Set<string>();
+		// The escalation law applies to any post-failure local→cloud hop:
+		// only the hint's head (and must's demanded set) bypass the tier
+		// gate — cloud rows below the head are failure-hops (W136 §5.2).
+		const gate = (row: CandidateRow, idx: number): boolean =>
+			sel.verb !== "must" &&
+			idx > 0 &&
+			row.kind === "cloud" &&
+			!mayEscalate({
+				group: row.group,
+				tier: req.tier,
+				attempts: st.attempts,
+				prefs: sel.prefs,
+				cloudGroups: sel.cloudGroups,
+			});
+		for (const [idx, row] of sel.ordered.entries()) {
+			if (req.signal?.aborted) return { kind: "aborted" };
+			if (gate(row, idx)) continue;
+			tried.add(row.candidate_id);
+			const r = await this.attemptTier(req, row.group, [row.dep], st);
+			if (r !== null) return r;
+		}
+		if (sel.verb === "must" && sel.fit === sel.total && sel.total > 0) {
+			// must-domain closed: no substitution beyond the hint (law 2)
+			return { kind: "exhausted", ...st };
+		}
+		return this.gatedLadder(req, sel, st, tried);
+	}
+
+	/** Ladder rungs after selection: flashx refused, cloud rungs fire only
+	 *  under the W136 escalation law (allow_cloud, not cost mode, tier
+	 *  warrants or quality, local failed twice). */
+	private async gatedLadder(
+		req: UpstreamRequest,
+		sel: RouteSelection,
+		st: { attempts: number; status: number; error: string },
+		tried: Set<string>,
+	): Promise<ExecuteResult> {
+		const tiers = [req.group, ...(this.policy.fallbacks?.[req.group] ?? [])];
+		for (const tier of tiers) {
+			if (FLASHX.test(tier)) {
+				this.metrics?.refused(tier);
+				continue;
+			}
+			if (
+				sel.cloudGroups.has(tier) &&
+				!mayEscalate({
+					group: tier,
+					tier: req.tier,
+					attempts: st.attempts,
+					prefs: sel.prefs,
+					cloudGroups: sel.cloudGroups,
+				})
+			)
+				continue; // gate closed: SIMPLE/MEDIUM never leave the machine
+			const candidates = this.tierCandidates(tier, req).filter(
+				(d) => !tried.has(candIdOf(d)),
+			);
 			if (candidates.length === 0) continue;
 			if (tier !== req.group) this.metrics?.fallback(tier);
 			const r = await this.attemptTier(req, tier, candidates, st);

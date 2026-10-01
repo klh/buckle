@@ -16,6 +16,43 @@ export interface UsageRecord {
 	requests: number;
 }
 
+/** W136 §6 decision row (the outcome fields ride the same table row). */
+export interface RouteAuditDecision {
+	rid: string;
+	ts: string;
+	actor: string;
+	dialect: string;
+	hint: string;
+	candidates_seen: number;
+	candidates_top: string;
+	target_kind: string | null;
+	target_host: string | null;
+	target_port: number | null;
+	target_model: string | null;
+	decision: string;
+	latency_class: string;
+	tier: string;
+	allow_cloud: boolean;
+	error_code: string | null;
+	why: string;
+}
+
+export interface RouteAuditOutcome {
+	status: number;
+	duration_ms: number;
+	ok: boolean;
+	err: string | null;
+}
+
+const INSERT_AUDIT = `
+INSERT INTO route_audit (
+  rid, ts, actor, dialect, hint,
+  candidates_seen, candidates_top,
+  target_kind, target_host, target_port, target_model,
+  decision, latency_class, tier, allow_cloud, error_code, why
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS router_usage (
   hour_bucket TEXT NOT NULL,
@@ -28,6 +65,23 @@ CREATE TABLE IF NOT EXISTS router_usage (
   cache_c INTEGER NOT NULL DEFAULT 0,
   requests INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (hour_bucket, key, model_group, model)
+);
+CREATE TABLE IF NOT EXISTS route_audit (
+  rid TEXT PRIMARY KEY,
+  ts TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT '',
+  dialect TEXT NOT NULL DEFAULT '',
+  hint TEXT NOT NULL DEFAULT '',
+  candidates_seen INTEGER NOT NULL DEFAULT 0,
+  candidates_top TEXT NOT NULL DEFAULT '',
+  target_kind TEXT, target_host TEXT, target_port INTEGER, target_model TEXT,
+  decision TEXT NOT NULL DEFAULT '',
+  latency_class TEXT NOT NULL DEFAULT 'unproven',
+  tier TEXT NOT NULL DEFAULT '',
+  allow_cloud INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT,
+  why TEXT NOT NULL DEFAULT '',
+  status INTEGER, duration_ms INTEGER, ok INTEGER, err TEXT
 );
 `;
 
@@ -78,6 +132,59 @@ export class Ledger {
 	rows(): Array<Record<string, unknown>> {
 		const stmt = this.db.query("SELECT * FROM router_usage");
 		return stmt.all() as Array<Record<string, unknown>>;
+	}
+
+	// ─── route_audit (W136 §6): one decision row per request, joined by rid
+	// to the outcome written after completion. Fire-and-forget WAL inserts —
+	// a failed audit write never fails the route (belt precedent). ───
+
+	/** Insert the decision row (target already known at dispatch). */
+	auditDecision(row: RouteAuditDecision): void {
+		try {
+			this.db
+				.query(INSERT_AUDIT)
+				.run(
+					row.rid,
+					row.ts,
+					row.actor,
+					row.dialect,
+					row.hint,
+					row.candidates_seen,
+					row.candidates_top,
+					row.target_kind,
+					row.target_host,
+					row.target_port,
+					row.target_model,
+					row.decision,
+					row.latency_class,
+					row.tier,
+					row.allow_cloud ? 1 : 0,
+					row.error_code,
+					row.why,
+				);
+		} catch {
+			// fire-and-forget
+		}
+	}
+
+	/** Update the decision row with the outcome (joined by rid). */
+	auditOutcome(rid: string, out: RouteAuditOutcome): void {
+		try {
+			this.db
+				.query(
+					"UPDATE route_audit SET status = ?, duration_ms = ?, ok = ?, err = ? WHERE rid = ?",
+				)
+				.run(out.status, out.duration_ms, out.ok ? 1 : 0, out.err, rid);
+		} catch {
+			// fire-and-forget
+		}
+	}
+
+	/** Read-back for tests / dashboards. */
+	auditRows(): Array<Record<string, unknown>> {
+		return this.db
+			.query("SELECT * FROM route_audit ORDER BY ts")
+			.all() as Array<Record<string, unknown>>;
 	}
 
 	close(): void {

@@ -22,3 +22,13 @@ gateway:
   cooldown_time: 30
   fallbacks:
     glm-5.3-flash: [local-swarm, gpt-5.2, claude-sonnet-5]
+
+# W136 §3.2 capability tags — the string hint tag regexps match against
+# (capability_text = tags + wire id). The fix for a must-miss is data, not
+# code: add the tag here (or to a good_at string), never a synonym at route
+# time. Honest 503 when no group carries the hinted tag — W136 §7.5.
+tags:
+  glm-5.3-flash: [fast, cheap, menial, general]
+  local-swarm: [local, general, fast, cheap, code, extract, reasoning]
+  gpt-5.2: [frontier, reasoning, code]
+  claude-sonnet-5: [frontier, reasoning, code, long-context]

@@ -6,18 +6,36 @@
 // MIT port). Errors follow the ingress dialect's error shape; unknown-usage
 // streams record requests without token columns — honest omission, never
 // estimated.
+import type { CandidateRow, CandidateTable } from "./candidates.ts";
+import {
+	type DecideResult,
+	type DecisionKind,
+	latencyClass,
+	type RouteSelection,
+} from "./decide.ts";
+import { hintFromHeaders, type RouteHint } from "./hints.ts";
 import { type Ledger, keyIdFromAuth } from "./ledger.ts";
 import { UpstreamError, type ExecuteResult, type Router } from "./router.ts";
 import { SseSniffer } from "./sse.ts";
 import type { Servicemon } from "./servicemon.ts";
 import type { Dialect, UpstreamPool } from "./upstreams.ts";
 import { usageFromAnthropic, usageFromOpenAI, type Usage } from "./usage.ts";
+import { scoreComplexity, textFromMessages } from "./complexity.ts";
 
 export interface AppDeps {
 	router: Router;
 	ledger: Ledger;
 	sm: Servicemon;
 	pool: UpstreamPool;
+	// W140: the pure decision over the candidate table + the table itself
+	// (EWMA outcomes, in-flight load)
+	decide: (input: {
+		group: string;
+		dialect: Dialect;
+		hint: RouteHint | null;
+		hintRaw: string;
+	}) => DecideResult;
+	table: CandidateTable;
 }
 
 interface App {
@@ -39,6 +57,49 @@ const SSE_HEADERS = (h: Headers): Headers => {
 };
 
 const enc = new TextEncoder();
+
+/** Short request id — the audit join key echoed as x-belt-rid. */
+function newRid(): string {
+	return `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const HEADERS_JSON = (h: Record<string, string>): Headers => {
+	const out = new Headers();
+	for (const [k, v] of Object.entries(h)) out.set(k, v);
+	return out;
+};
+
+/** Stamp the W136 wire headers on a response without touching its body:
+ *  x-belt-rid always; x-belt-route (single-line JSON: rid, target, decision,
+ *  latency_class, tier) on every router-decided response; x-belt-error on
+ *  errors. */
+function stamped(
+	resp: Response,
+	ctx: Ctx,
+	route: { decision: string; row?: CandidateRow; code?: string | null },
+): Response {
+	const payload: Record<string, unknown> = {
+		rid: ctx.rid,
+		decision: route.decision,
+	};
+	if (route.row) {
+		payload.target = {
+			kind: route.row.kind,
+			host: route.row.host,
+			port: route.row.port,
+			model: route.row.model,
+		};
+		payload.latency_class = latencyClass(route.row.estimate_ms);
+	}
+	if (ctx.tier) payload.tier = ctx.tier;
+	const hs = HEADERS_JSON({
+		"x-belt-rid": ctx.rid,
+		"x-belt-route": JSON.stringify(payload),
+		...(route.code ? { "x-belt-error": route.code } : {}),
+	});
+	for (const [k, v] of hs) resp.headers.set(k, v);
+	return resp;
+}
 
 /** Error body per ingress dialect (anthropic envelope vs openai error obj). */
 export function errorResponse(
@@ -72,6 +133,65 @@ interface Ctx {
 	group: string;
 	model: string;
 	dialect: Dialect;
+	rid: string;
+	hintRaw: string;
+	hint: RouteHint | null;
+	tier: string;
+	t0: number;
+	sel?: RouteSelection;
+}
+
+/** A refusal at the wire seam (bad hint, bad body): the denied audit row
+ *  (denied audits too — W136 §6). */
+function deny(
+	deps: AppDeps,
+	ctx: Ctx,
+	status: number,
+	why: string,
+	code: string | null,
+	decision: "denied" | "errored",
+): Response {
+	deps.ledger.auditDecision({
+		rid: ctx.rid,
+		ts: new Date().toISOString(),
+		actor: ctx.key,
+		dialect: ctx.dialect,
+		hint: ctx.hintRaw,
+		candidates_seen: 0,
+		candidates_top: "",
+		target_kind: null,
+		target_host: null,
+		target_port: null,
+		target_model: null,
+		decision,
+		latency_class: "unproven",
+		tier: ctx.tier,
+		allow_cloud: false,
+		error_code: code,
+		why,
+	});
+	return auditAndStamp(deps, ctx, status, why, code, decision);
+}
+
+/** Outcome row + dialect envelope + stamped headers for a refusal. */
+function auditAndStamp(
+	deps: AppDeps,
+	ctx: Ctx,
+	status: number,
+	why: string,
+	code: string | null,
+	decision: "denied" | "errored",
+): Response {
+	deps.ledger.auditOutcome(ctx.rid, {
+		status,
+		duration_ms: Date.now() - ctx.t0,
+		ok: false,
+		err: why,
+	});
+	const resp = code
+		? errorResponse(ctx.dialect, status, `belt: ${code} — ${why}`)
+		: errorResponse(ctx.dialect, status, why);
+	return stamped(resp, ctx, { decision, code });
 }
 
 async function proxy(
@@ -80,22 +200,47 @@ async function proxy(
 	path: string,
 	deps: AppDeps,
 ): Promise<Response> {
+	const ctx: Ctx = {
+		key: keyIdFromAuth(req.headers.get("authorization")),
+		group: "",
+		model: "",
+		dialect,
+		rid: newRid(),
+		hintRaw: "",
+		hint: null,
+		t0: 0,
+		tier: "",
+	};
+	ctx.t0 = Date.now();
+	const hint = hintFromHeaders(req.headers);
+	if (!hint.ok) return deny(deps, ctx, 400, hint.why, "bad_hint", "denied");
 	let body: Record<string, unknown>;
 	try {
 		body = (await req.json()) as Record<string, unknown>;
 	} catch {
-		return errorResponse(dialect, 400, "invalid JSON body");
+		return deny(deps, ctx, 400, "invalid JSON body", null, "denied");
 	}
 	const model = typeof body.model === "string" ? body.model : "";
-	if (model.length === 0) {
-		return errorResponse(dialect, 400, "missing model");
-	}
-	const ctx: Ctx = {
-		key: keyIdFromAuth(req.headers.get("authorization")),
+	if (model.length === 0)
+		return deny(deps, ctx, 400, "missing model", null, "denied");
+	ctx.group = model;
+	ctx.model = model;
+	ctx.hint = hint.hint;
+	ctx.hintRaw = hint.raw;
+	ctx.tier = scoreComplexity(textFromMessages(body.messages)).tier;
+	const sel = deps.decide({
 		group: model,
-		model,
 		dialect,
-	};
+		hint: ctx.hint,
+		hintRaw: ctx.hintRaw,
+	});
+	if (!sel.ok) {
+		deps.sm
+			.counter("buckle_route_decisions_total", "Routing decisions.")
+			.inc({ decision: "errored", dialect });
+		return deny(deps, ctx, 503, sel.err.why, sel.err.code, "errored");
+	}
+	ctx.sel = sel.sel;
 	return runExecute(req, ctx, path, body, deps);
 }
 
@@ -106,6 +251,28 @@ async function runExecute(
 	body: Record<string, unknown>,
 	deps: AppDeps,
 ): Promise<Response> {
+	const sel = ctx.sel;
+	if (!sel) return deny(deps, ctx, 503, "no selection", "no_route", "errored");
+	deps.ledger.auditDecision({
+		rid: ctx.rid,
+		ts: new Date().toISOString(),
+		actor: ctx.key,
+		dialect: ctx.dialect,
+		hint: ctx.hintRaw,
+		candidates_seen: sel.seen,
+		candidates_top: sel.top.join(","),
+		target_kind: sel.head.kind,
+		target_host: sel.head.host,
+		target_port: sel.head.port,
+		target_model: sel.head.model,
+		decision: sel.decision,
+		latency_class: latencyClass(sel.head.estimate_ms),
+		tier: ctx.tier,
+		allow_cloud: sel.prefs.allow_cloud,
+		error_code: null,
+		why: sel.why,
+	});
+	deps.table.inflight(sel.head.candidate_id, 1);
 	let result: ExecuteResult;
 	try {
 		result = await deps.router.execute({
@@ -115,13 +282,58 @@ async function runExecute(
 			body,
 			key: ctx.key,
 			signal: req.signal,
+			sel,
+			tier: ctx.tier,
+			hintRaw: ctx.hintRaw,
 		});
 	} catch (e) {
+		deps.table.inflight(sel.head.candidate_id, -1);
 		if (e instanceof UpstreamError)
-			return errorResponse(ctx.dialect, 502, e.message);
+			return deny(deps, ctx, 502, e.message, "no_route", "errored");
 		throw e;
 	}
-	return handleResult(deps, ctx, result);
+	const resp = await handleResult(deps, ctx, result);
+	return finishResponse(deps, ctx, sel, result, resp);
+}
+
+/** Stamps the delivered outcome onto the response + audit + EWMA.
+ *  Delivered ≠ selected → decision "fallback" (delivery truth outranks
+ *  ranking truth; W136 §7.6). */
+function finishResponse(
+	deps: AppDeps,
+	ctx: Ctx,
+	sel: RouteSelection,
+	result: ExecuteResult,
+	resp: Response,
+): Response {
+	let decision: DecisionKind = sel.decision;
+	let row: CandidateRow | undefined = sel.head;
+	let code: string | null = null;
+	if (result.kind === "upstream") {
+		row = deps.table.rowFor(result.candidateId) ?? sel.head;
+		if (result.candidateId !== sel.head.candidate_id) decision = "fallback";
+	} else if (result.kind === "exhausted") {
+		decision = "errored";
+		code = "no_route";
+	} else if (result.kind === "aborted") {
+		decision = "errored";
+	}
+	const ms = Date.now() - ctx.t0;
+	const ok = result.kind === "upstream" || result.kind === "client-error";
+	deps.table.inflight(sel.head.candidate_id, -1);
+	const winner =
+		result.kind === "upstream" ? result.candidateId : sel.head.candidate_id;
+	deps.table.recordOutcome(winner, ms, result.kind === "upstream");
+	deps.ledger.auditOutcome(ctx.rid, {
+		status: resp.status,
+		duration_ms: ms,
+		ok,
+		err: result.kind === "exhausted" ? result.error : null,
+	});
+	deps.sm
+		.counter("buckle_route_decisions_total", "Routing decisions.")
+		.inc({ decision, dialect: ctx.dialect });
+	return stamped(resp, ctx, { decision, row, code });
 }
 
 function handleResult(
