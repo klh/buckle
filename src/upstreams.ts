@@ -28,6 +28,10 @@ export interface Deployment {
 	adapter?: string;
 	// family parameters (region, project, api-version) — never secrets
 	adapter_config?: Record<string, unknown>;
+	// W154 visibility law: `spoke-private` excludes the group from
+	// /federation/entitlements (defensive marker; spoke-local pools are
+	// structurally absent from the hub pool anyway).
+	visibility?: string;
 	group: string;
 }
 
@@ -43,6 +47,7 @@ interface DeploymentSpec {
 	api_key_env?: string;
 	adapter?: string;
 	adapter_config?: Record<string, unknown>;
+	visibility?: string;
 }
 
 export interface UpstreamPool {

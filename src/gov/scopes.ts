@@ -5,14 +5,18 @@
 
 export const SCOPE_RE = /^buckle:[a-z_]+:(READ_|WRITE_)$/;
 
-export type BuckleResource = "proxy" | "admin";
+export type BuckleResource = "proxy" | "admin" | "spoke";
 
-/** All four concrete scopes; root = this exact list, no wildcards. */
+/** All four concrete scopes; root = this exact list, no wildcards.
+ *  W154 adds the spoke pair: federation pull surfaces (policy manifest,
+ *  entitlements) and CR delivery confirmation read/write as a spoke. */
 export const ALL_SCOPES: readonly string[] = [
 	"buckle:proxy:READ_",
 	"buckle:proxy:WRITE_",
 	"buckle:admin:READ_",
 	"buckle:admin:WRITE_",
+	"buckle:spoke:READ_",
+	"buckle:spoke:WRITE_",
 ];
 
 /** Normalize+validate one scope string; null when not buckle-shaped. */

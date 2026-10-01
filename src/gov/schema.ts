@@ -48,6 +48,16 @@ CREATE TABLE IF NOT EXISTS auth_events (
   jti TEXT,
   via TEXT
 );
+CREATE TABLE IF NOT EXISTS federation_cr_queue (
+  id TEXT PRIMARY KEY,
+  action TEXT NOT NULL,
+  target TEXT NOT NULL,
+  declared_at TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'declared',
+  note TEXT,
+  updated_at INTEGER,
+  reported_at INTEGER
+);
 `;
 
 /** (table, pk-expression, columns) — mirrors the govdb deltaTables entries. */
@@ -87,6 +97,20 @@ const DELTA_TABLES: Array<{ tbl: string; pk: string; cols: string[] }> = [
 		tbl: "auth_events",
 		pk: "$.id",
 		cols: ["id", "ts", "actor", "event", "jti", "via"],
+	},
+	{
+		tbl: "federation_cr_queue",
+		pk: "$.id",
+		cols: [
+			"id",
+			"action",
+			"target",
+			"declared_at",
+			"state",
+			"note",
+			"updated_at",
+			"reported_at",
+		],
 	},
 ];
 

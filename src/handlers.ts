@@ -11,6 +11,7 @@ import type { AidsLedger } from "./aids.ts";
 import { aidsRoutes, applyWireAids } from "./aids-routes.ts";
 import type { Preseeder } from "./preseed.ts";
 import type { AidsPolicy } from "./policy.ts";
+import { principalOf, type Federation } from "./gov/federation.ts";
 import {
 	type DecideResult,
 	type DecisionKind,
@@ -45,6 +46,9 @@ export interface AppDeps {
 	aids: AidsLedger;
 	preseeder: Preseeder;
 	aidsPolicy: AidsPolicy;
+	// W154 federation surface — present on hub-shaped deps (buildDeps);
+	// optional so bare deps (testDeps, dev) 404 honestly.
+	federation?: Federation;
 }
 
 interface App {
@@ -518,6 +522,9 @@ export function createApp(deps: AppDeps): App {
 		if (req.method === "GET" && path === "/v1/models") return models(deps);
 		if (req.method === "GET" && path === "/health") {
 			return new Response("ok", { headers: { "content-type": "text/plain" } });
+		}
+		if (path.startsWith("/federation") && deps.federation) {
+			return deps.federation.handle(req, principalOf(req));
 		}
 		const aidsRouted = await aidsRoutes(deps, req, path);
 		if (aidsRouted) return aidsRouted;

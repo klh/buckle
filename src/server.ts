@@ -14,6 +14,7 @@ import type { Dialect } from "./upstreams.ts";
 import { Ledger } from "./ledger.ts";
 import { poolWarm, prewarm } from "./pool-warm.ts";
 import { createGovernance, type GovernanceOpts } from "./gov/middleware.ts";
+import { Federation } from "./gov/federation.ts";
 import { loadGatewayPolicy, loadPrefs } from "./policy.ts";
 import { Router, type RouterMetrics } from "./router.ts";
 import { servicemon } from "./servicemon.ts";
@@ -129,6 +130,8 @@ export function buildDeps(
 			candidates: table.snapshot(),
 			prefs,
 		});
+	const dbPath = opts.dbPath ?? process.env.BUCKLE_DB ?? "buckle.db";
+	const federation = new Federation({ dbPath, policy, pool });
 	return {
 		router,
 		ledger,
@@ -139,13 +142,15 @@ export function buildDeps(
 		pool,
 		decide,
 		table,
+		federation,
 	};
 }
 
-/** Start buckle on the shadow port. Returns the Bun server for tests. */
+/** Start buckle on the shadow port. Returns the Bun server for tests, with
+ *  `.gov` attached (W154: tests and W160 seed/read the CR queue through it). */
 export function startServer(
 	opts: ServerOpts = {},
-): ReturnType<typeof Bun.serve> {
+): ReturnType<typeof Bun.serve> & { gov: ReturnType<typeof createGovernance> } {
 	const port = resolvePort(opts.port);
 	const deps = buildDeps(opts, port);
 	const app = createApp(deps);
@@ -159,16 +164,20 @@ export function startServer(
 			dbPath: opts.dbPath ?? process.env.BUCKLE_DB ?? "buckle.db",
 			rootKey: opts.auth?.rootKey,
 			jwt: opts.auth?.jwt,
+			federation: deps.federation,
 		},
 	);
 	gov.budgets.startFlushTimer();
 	const gated = authOn ? gov.gate(app.fetch) : app.fetch;
 	const inner = deps.sm.fetch(gated);
-	return Bun.serve({
+	const server = Bun.serve({
 		hostname: opts.hostname ?? "127.0.0.1",
 		port,
 		fetch: inner,
 	});
+	return Object.assign(server, { gov }) as ReturnType<typeof Bun.serve> & {
+		gov: ReturnType<typeof createGovernance>;
+	};
 }
 
 /** Entry: bind the shadow port, log the guard. */

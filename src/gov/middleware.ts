@@ -11,6 +11,7 @@ import { KeyStore, hashKey } from "./keys.ts";
 import { createJwtValidator, type JwtOpts, jwtScopeCheck } from "./jwt.ts";
 import { applyGovernanceSchema } from "./schema.ts";
 import { ALL_SCOPES, hasScope, scopesFromStorage } from "./scopes.ts";
+import { stashPrincipal, type Federation } from "./federation.ts";
 import type { Ledger } from "../ledger.ts";
 import type { Servicemon } from "../servicemon.ts";
 
@@ -19,6 +20,10 @@ export interface GovernanceOpts {
 	// break-glass bootstrap token (hashed by lookup, never stored)
 	rootKey?: string;
 	jwt?: JwtOpts;
+	// W154: the shared Federation surface — the gate handles its auth
+	// semantics (anonymous spoke-pull GETs, validated creds, spoke scope
+	// for POST); serving itself lives on the app deps.
+	federation?: Federation;
 }
 
 export interface Principal {
@@ -56,17 +61,24 @@ export class Governance {
 	private readonly ledger: Ledger;
 	private readonly jwtValidator: ReturnType<typeof createJwtValidator> | null;
 	private readonly rootHash: string | null;
+	/** W154: shared Federation surface (auth semantics at the gate; serving
+	 *  itself lives on the app deps). */
+	readonly federation: Federation | null;
 
 	constructor(deps: GovernanceDeps, opts: GovernanceOpts) {
 		this.sm = deps.sm;
 		this.ledger = deps.ledger;
-		this.db = new Database(opts.dbPath, { create: true });
+		// W154: adopt the shared Federation handle when present — one DB per
+		// process, so :memory: tests and CR/team reads see one world.
+		this.db =
+			opts.federation?.db ?? new Database(opts.dbPath, { create: true });
 		this.db.exec("PRAGMA journal_mode = WAL");
 		applyGovernanceSchema(this.db);
 		this.keys = new KeyStore(this.db);
 		this.budgets = new Budgets(this.db);
 		this.jwtValidator = opts.jwt ? createJwtValidator(opts.jwt) : null;
 		this.rootHash = opts.rootKey ? hashKey(opts.rootKey) : null;
+		this.federation = opts.federation ?? null;
 	}
 
 	/** Denial audit: route_audit row (denied audits too — W136) + counter. */
@@ -207,6 +219,8 @@ export class Governance {
 			const path = new URL(req.url).pathname;
 			const routeClass = classify(path);
 			if (routeClass === "public") return inner(req);
+			if (routeClass === "federation")
+				return this.federationGate(req, path, inner);
 			const t0 = Date.now();
 			const rid = `g${t0.toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 			const auth = await this.authenticate(req);
@@ -233,6 +247,41 @@ export class Governance {
 				inner,
 			);
 		};
+	}
+
+	/** Federation semantics (W154): anonymous GET = phase-1 spoke-pull (W156
+	 *  signatures bring authenticity); presented creds always validated
+	 *  (invalid bearer = 401, never downgraded); POST needs spoke:WRITE_. */
+	private async federationGate(
+		req: Request,
+		path: string,
+		inner: (req: Request) => Response | Promise<Response>,
+	): Promise<Response> {
+		if (this.federation === null) return inner(req);
+		const m = /^Bearer\s+(.+)$/i.exec(req.headers.get("authorization") ?? "");
+		if (m === null) {
+			if (req.method === "GET") return inner(req);
+			return authError(401, "buckle.auth_missing", "missing bearer token");
+		}
+		const auth = await this.authenticate(req);
+		if (!auth.ok) {
+			this.rejectEvent(req, auth.code);
+			this.auditDenial({
+				rid: `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+				actor: actorOf(req),
+				route: path,
+				dialect: "federation",
+				code: auth.code,
+				status: auth.status,
+				why: auth.why,
+			});
+			return authError(auth.status, auth.code, auth.why);
+		}
+		const needed = scopeNeeded("spoke", req.method);
+		if (!hasScope(auth.principal.scopes, needed))
+			return authError(403, "buckle.insufficient_scope", `requires ${needed}`);
+		stashPrincipal(req, auth.principal);
+		return inner(req);
 	}
 
 	/** auth_events rejected row keyed by the presented credential hint. */
@@ -386,17 +435,23 @@ export function authError(
 	);
 }
 
-/** Route classes at the gate: public telemetry, admin API, LLM proxy. */
-export function classify(path: string): "public" | "admin" | "proxy" {
+/** Route classes at the gate: public telemetry, admin API, spoke-pull
+ *  federation, LLM proxy. Federation paths get deliberate handling — they
+ *  are NOT anonymous proxy-class 401s anymore (W154). */
+export function classify(
+	path: string,
+): "public" | "admin" | "proxy" | "federation" {
 	if (path === "/health" || path === "/status" || path === "/metrics")
 		return "public";
+	if (path === "/federation" || path.startsWith("/federation/"))
+		return "federation";
 	if (path.startsWith("/v1/admin")) return "admin";
 	return "proxy";
 }
 
 /** Scope requirement per route class + method (READ_ for GET, WRITE_ else). */
 export function scopeNeeded(
-	routeClass: "admin" | "proxy",
+	routeClass: "admin" | "proxy" | "spoke",
 	method: string,
 ): string {
 	const role = method === "GET" ? "READ_" : "WRITE_";
