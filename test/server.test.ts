@@ -59,6 +59,7 @@ describe("e2e through Bun.serve", () => {
 			port: 0,
 			upstreamsPath: `${dir}/upstreams.yaml`,
 			dbPath: ":memory:",
+			auth: { rootKey: "test-key" },
 		});
 		const base = `http://127.0.0.1:${server.port}`;
 		const res = await fetch(`${base}/v1/chat/completions`, {
@@ -69,7 +70,9 @@ describe("e2e through Bun.serve", () => {
 		expect(res.status).toBe(200);
 		const out = (await res.json()) as { id: string };
 		expect(out.id).toBe("srv-1");
-		const models = await fetch(`${base}/v1/models`);
+		const models = await fetch(`${base}/v1/models`, {
+			headers: { authorization: "Bearer test-key" },
+		});
 		const list = (await models.json()) as { data: Array<{ id: string }> };
 		expect(list.data.map((m) => m.id)).toContain("glm-5.3-flash");
 		const status = await fetch(`${base}/status`);

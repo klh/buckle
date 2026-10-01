@@ -10,6 +10,7 @@ import type { RouteHint } from "./hints.ts";
 import { createApp, type AppDeps } from "./handlers.ts";
 import type { Dialect } from "./upstreams.ts";
 import { Ledger } from "./ledger.ts";
+import { createGovernance, type GovernanceOpts } from "./gov/middleware.ts";
 import { loadGatewayPolicy, loadPrefs } from "./policy.ts";
 import { Router, type RouterMetrics } from "./router.ts";
 import { servicemon } from "./servicemon.ts";
@@ -25,6 +26,8 @@ export interface ServerOpts {
 	policyPath?: string;
 	upstreamsPath?: string;
 	prefsPath?: string;
+	// W141 governance: root break-glass key + optional JWT validator config.
+	auth?: Pick<GovernanceOpts, "rootKey" | "jwt">;
 }
 
 /** Port resolution with the 4100 guard; explicit arg wins over env. */
@@ -108,10 +111,25 @@ export function startServer(
 	const port = resolvePort(opts.port);
 	const deps = buildDeps(opts, port);
 	const app = createApp(deps);
+	// W141 governance gate: enforced unless BUCKLE_AUTH=off (empty string
+	// counts as unset — the W147 empty-env lesson).
+	const authEnv = process.env.BUCKLE_AUTH ?? "";
+	const authOn = authEnv.length > 0 ? authEnv !== "off" : true;
+	const gov = createGovernance(
+		{ ledger: deps.ledger, sm: deps.sm },
+		{
+			dbPath: opts.dbPath ?? process.env.BUCKLE_DB ?? "buckle.db",
+			rootKey: opts.auth?.rootKey,
+			jwt: opts.auth?.jwt,
+		},
+	);
+	gov.budgets.startFlushTimer();
+	const gated = authOn ? gov.gate(app.fetch) : app.fetch;
+	const inner = deps.sm.fetch(gated);
 	return Bun.serve({
 		hostname: opts.hostname ?? "127.0.0.1",
 		port,
-		fetch: deps.sm.fetch(app.fetch),
+		fetch: inner,
 	});
 }
 
