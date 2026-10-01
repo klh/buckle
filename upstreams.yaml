@@ -31,3 +31,41 @@ groups:
       adapter: openai-compat
   gpt-5.2: [] # dormant — activation is a BUCKLE_UPSTREAMS override, never a committed key
   claude-sonnet-5: [] # dormant — same
+
+# W150 catalog examples (comments only — activation is a BUCKLE_UPSTREAMS
+# override; keys stay in env vars named in api_key_env, values never here).
+# The adapter: field may name a family, a catalog provider, or — with an
+# explicit adapter_config — an unknown provider (openai-compat catch-all;
+# fail-closed without it). Public API bases only in examples.
+#
+#  azure-example:
+#    - url: https://REPLACE.openai.azure.com
+#      dialect: openai
+#      adapter: azure-openai
+#      api_key_env: AZURE_API_KEY
+#      model: gpt-5.2                # deployment name
+#      adapter_config:
+#        api_version: "2026-03-01-preview"
+#  bedrock-example:
+#    - url: https://bedrock-runtime.us-east-1.amazonaws.com
+#      dialect: openai
+#      adapter: bedrock              # sigv4; region required
+#      adapter_config:
+#        region: us-east-1
+#  vertex-example:
+#    - url: https://aiplatform.googleapis.com
+#      dialect: openai
+#      adapter: vertex_ai            # catalog name → vertex family
+#      adapter_config:
+#        project: REPLACE_PROJECT
+#        region: global
+#  gemini-example:
+#    - url: https://generativelanguage.googleapis.com
+#      dialect: openai
+#      adapter: gemini               # catalog name → vertex family, api-key profile
+#      api_key_env: GEMINI_API_KEY
+#  openrouter-example:
+#    - url: https://openrouter.ai/api/v1
+#      dialect: openai
+#      adapter: openrouter           # catalog tier-3 → openai-compat
+#      api_key_env: OPENROUTER_API_KEY

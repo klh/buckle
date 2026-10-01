@@ -7,7 +7,7 @@
 import { YAML } from "bun";
 import { existsSync, readFileSync } from "node:fs";
 import { resolveAdapter } from "./adapters/index.ts";
-import { deriveAdapter, type AdapterFamily } from "./adapters/types.ts";
+import { deriveAdapter } from "./adapters/types.ts";
 
 export type Dialect = "openai" | "anthropic";
 
@@ -21,8 +21,11 @@ export interface Deployment {
 	// env var name holding the bearer token (never the token itself)
 	api_key_env?: string;
 	// per-DEPLOYMENT wire family (W134 §4.2): absent = derived from the
-	// dialect; a group may mix families.
-	adapter?: AdapterFamily;
+	// dialect; a group may mix families. W150: may also name a catalog
+	// provider (src/adapters/catalog-table.ts) or, with an explicit
+	// adapter_config, an unknown name resolves to the openai-compat
+	// catch-all (fail-closed otherwise).
+	adapter?: string;
 	// family parameters (region, project, api-version) — never secrets
 	adapter_config?: Record<string, unknown>;
 	group: string;
@@ -38,7 +41,7 @@ interface DeploymentSpec {
 	dialect: Dialect;
 	model?: string;
 	api_key_env?: string;
-	adapter?: AdapterFamily;
+	adapter?: string;
 	adapter_config?: Record<string, unknown>;
 }
 

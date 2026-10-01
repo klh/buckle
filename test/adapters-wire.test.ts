@@ -24,12 +24,15 @@ const OPENAI_REQ = {
 };
 
 describe("registry (fail closed)", () => {
-	test("tier-1 resolves; tier-2 and unknown names throw", () => {
+	test("five families resolve; unknown names fail closed", () => {
 		expect(getAdapter("openai-compat").family).toBe("openai-compat");
 		expect(getAdapter("anthropic").dialect).toBe("anthropic");
-		expect(() => getAdapter("bedrock")).toThrow(/tier-2/);
+		// W150: tier-2 ports landed — they resolve through the registry
+		expect(getAdapter("azure-openai").family).toBe("azure-openai");
+		expect(getAdapter("bedrock").family).toBe("bedrock");
+		expect(getAdapter("vertex").family).toBe("vertex");
 		expect(() =>
-			resolveAdapter({ adapter: "nope" as never, dialect: "openai" }),
+			resolveAdapter({ adapter: "nope", dialect: "openai" }),
 		).toThrow(/unknown adapter/);
 	});
 
@@ -77,8 +80,8 @@ describe("upstreams adapter field", () => {
 	});
 });
 
-describe("tier-2 family named in config", () => {
-	test("fails closed at startup, naming the group", () => {
+describe("tier-2 family named in config (W150)", () => {
+	test("bedrock named in config loads; resolution is deferred to request time", () => {
 		const dir = `/tmp/buckle-adapters-${Date.now()}`;
 		const cfg =
 			`groups:\n  aws:\n    - url: http://127.0.0.1:9\n` +
@@ -86,7 +89,9 @@ describe("tier-2 family named in config", () => {
 		const p = `${dir}/u.yaml`;
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(p, cfg);
-		expect(() => loadUpstreams(p)).toThrow(/group "aws"/);
+		const pool = loadUpstreams(p);
+		const dep = pool.deployments("aws")[0];
+		expect(dep?.adapter).toBe("bedrock");
 	});
 });
 

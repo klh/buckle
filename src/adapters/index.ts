@@ -1,28 +1,28 @@
 // src/adapters/index.ts — the adapter registry (W134 §2: dispatch is a
 // registry, not LiteLLM's if/elif chain at main.py:5005/:5750-5860 — that
-// dispatch tax is exactly what we do not pay). Unknown names fail closed:
-// the pool validator rejects them at startup, naming the offending group.
+// dispatch tax is exactly what we do not pay). W150: all five families
+// resolve; unknown NAMES fail closed unless the catalog knows the provider
+// or an explicit adapter_config opts into the openai-compat catch-all.
 import type { Dialect } from "../upstreams.ts";
 import { ANTHROPIC } from "./anthropic.ts";
+import { AZURE_OPENAI } from "./azure-openai.ts";
+import { BEDROCK } from "./bedrock.ts";
+import { VERTEX } from "./vertex.ts";
+import { resolveCatalogFamily } from "./catalog.ts";
 import { OPENAI_COMPAT } from "./openai-compat.ts";
-import {
-	ADAPTER_FAMILIES,
-	deriveAdapter,
-	isAdapterFamily,
-	type AdapterFamily,
-	type ChatAdapter,
-} from "./types.ts";
+import { deriveAdapter, isAdapterFamily, type ChatAdapter } from "./types.ts";
 
-const REGISTRY: Partial<Record<AdapterFamily, ChatAdapter>> = {
+const REGISTRY: Partial<Record<string, ChatAdapter>> = {
 	"openai-compat": OPENAI_COMPAT,
 	anthropic: ANTHROPIC,
-	// azure-openai / bedrock / vertex: tier-2 ports (W134 §3) — a config
-	// naming them fails closed at startup (see getAdapter) until a port lands
+	"azure-openai": AZURE_OPENAI,
+	bedrock: BEDROCK,
+	vertex: VERTEX,
 };
 
-/** Registry lookup. Unknown/unimplemented families throw — never a silent
+/** Registry lookup. Unknown/unimplemented names throw — never a silent
  *  passthrough (W134 §2 dispatch lesson). */
-export function getAdapter(family: AdapterFamily): ChatAdapter {
+export function getAdapter(family: string): ChatAdapter {
 	const adapter = REGISTRY[family];
 	if (!adapter) {
 		throw new Error(
@@ -33,19 +33,19 @@ export function getAdapter(family: AdapterFamily): ChatAdapter {
 }
 
 /** Deployment → adapter: the explicit per-deployment `adapter:` field wins;
- *  absent, derive from the dialect (W134 §4.2 back-compat — every
- *  pre-adapter deployment resolves through here). */
+ *  absent, derive from the dialect (W134 §4.2 back-compat). W150: the field
+ *  may also name a CATALOG PROVIDER (e.g. `adapter: openrouter` → its row's
+ *  family) or, with an explicit adapter_config, an unknown name → the
+ *  openai-compat catch-all; otherwise fail closed. */
 export function resolveAdapter(dep: {
-	adapter?: AdapterFamily;
+	adapter?: string;
 	dialect: Dialect;
+	adapter_config?: Record<string, unknown>;
 }): ChatAdapter {
-	const family = dep.adapter ?? deriveAdapter(dep.dialect);
-	if (!isAdapterFamily(family)) {
-		throw new Error(
-			`adapters: unknown adapter "${String(family)}" (known: ${ADAPTER_LIST})`,
-		);
-	}
-	return getAdapter(family);
+	const name = dep.adapter ?? deriveAdapter(dep.dialect);
+	if (isAdapterFamily(name)) return getAdapter(name);
+	const hasConfig =
+		dep.adapter_config !== undefined &&
+		Object.keys(dep.adapter_config).length > 0;
+	return getAdapter(resolveCatalogFamily(String(name), hasConfig));
 }
-
-const ADAPTER_LIST = [...ADAPTER_FAMILIES].join(", ");
