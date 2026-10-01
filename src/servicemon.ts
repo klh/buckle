@@ -18,6 +18,8 @@
 //                dimension omits the family honestly rather than faking
 //                zeros. /health stays whatever it was (compat).
 
+import { methodNotAllowed, options204, problem } from "./citizenship.ts";
+
 export const DEFAULT_BUCKETS: number[] = [
 	0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
 ];
@@ -133,7 +135,7 @@ export function servicemon(opts: ServicemonOptions): Servicemon {
 	const startedMs = performance.now();
 	const refreshS = opts.refreshS ?? parseRefreshS();
 	let lastError: { at: string; message: string } | null = null;
-	let statusCache: { at: number; body: string } | null = null;
+	let statusCache: { at: number; body: string; etag: string } | null = null;
 
 	const counter = (name: string, help: string): Counter => {
 		const fam = (): CounterFamily => {
@@ -275,15 +277,35 @@ export function servicemon(opts: ServicemonOptions): Servicemon {
 		};
 	};
 
-	const statusResponse = (): Response => {
+	/** Strong ETag = sha256 of the cached body (http-citizenship: /status is
+	 *  a GET-able resource; If-None-Match hit → 304 with the ETag echo). */
+	const etagOf = (body: string): string =>
+		`"${new Bun.CryptoHasher("sha256").update(body).digest("hex")}"`;
+
+	const etagHit = (ifNoneMatch: string, etag: string): boolean =>
+		ifNoneMatch
+			.split(",")
+			.some((c) => c.trim() === "*" || c.trim().replace(/^W\//, "") === etag);
+
+	const statusResponse = (req: Request): Response => {
 		if (
 			refreshS <= 0 ||
-			!statusCache ||
+			statusCache === null ||
 			Date.now() - statusCache.at >= refreshS * 1000
-		)
-			statusCache = { at: Date.now(), body: JSON.stringify(snapshot()) };
-		return new Response(statusCache.body, {
+		) {
+			const body = JSON.stringify(snapshot());
+			statusCache = { at: Date.now(), body, etag: etagOf(body) };
+		}
+		const cache = statusCache;
+		const inm = req.headers.get("if-none-match");
+		if (inm !== null && etagHit(inm, cache.etag))
+			return new Response(null, {
+				status: 304,
+				headers: { etag: cache.etag, "cache-control": "no-store" },
+			});
+		return new Response(cache.body, {
 			headers: {
+				etag: cache.etag,
 				"content-type": "application/json; charset=utf-8",
 				"cache-control": "no-store",
 			},
@@ -307,19 +329,31 @@ export function servicemon(opts: ServicemonOptions): Servicemon {
 		let resp: Response;
 		let threw = false;
 		if (path === "/status" || path === "/metrics") {
-			if (path === "/metrics" && opts.onMetrics) {
-				try {
-					opts.onMetrics();
-				} catch {}
+			// http-citizenship: GET/HEAD serve, OPTIONS introspects, anything
+			// else is 405 + Allow (the smoke's DELETE /status probes this).
+			if (req.method === "OPTIONS") {
+				resp = options204("GET, HEAD, OPTIONS");
+			} else if (req.method !== "GET" && req.method !== "HEAD") {
+				resp = methodNotAllowed(path);
+			} else {
+				if (path === "/metrics" && opts.onMetrics) {
+					try {
+						opts.onMetrics();
+					} catch {}
+				}
+				resp = path === "/status" ? statusResponse(req) : metricsResponse();
 			}
-			resp = path === "/status" ? statusResponse() : metricsResponse();
 		} else {
 			try {
 				resp = await inner(req);
 			} catch (e) {
 				threw = true;
 				noteError(e instanceof Error ? e.message : String(e));
-				resp = new Response("internal error", { status: 500 });
+				resp = problem({
+					status: 500,
+					code: "buckle.internal_error",
+					why: "internal error",
+				});
 			}
 		}
 		httpRequests.inc({ route });

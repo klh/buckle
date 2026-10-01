@@ -130,8 +130,8 @@ describe("federation: entitlements (echo menu, visibility law)", () => {
 			headers: { authorization: "Bearer bksk_nope" },
 		});
 		expect(res.status).toBe(401);
-		const body = (await res.json()) as { error: { code: string } };
-		expect(body.error.code).toBe("buckle.invalid_key");
+		const body = (await res.json()) as { code: string };
+		expect(body.code).toBe("buckle.invalid_key");
 		fed.stop();
 	});
 });

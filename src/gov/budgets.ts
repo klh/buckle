@@ -31,6 +31,17 @@ export function windowRemainderS(nowMs: number): number {
 	return Math.max(1, Math.ceil(60 - (s % 60)));
 }
 
+/** What admission saw, for the http-citizenship rate-limit trio: usage
+ *  AFTER this request's reservation, and the window's honest edges. */
+export interface BudgetView {
+	usedReqs: number;
+	usedTks: number;
+	/** Seconds until the minute window rolls (>=1). */
+	resetS: number;
+	/** Unix epoch seconds of the window's end (de-facto x- family). */
+	resetEpochS: number;
+}
+
 /** Effective limit = min(key limit, team ceiling); null = unbounded. */
 export function effectiveLimit(
 	key: BudgetLimits,
@@ -74,24 +85,42 @@ export class Budgets {
 	}
 
 	/** Admission check + request count. Denial returns retry-after seconds
-	 *  (window remainder + U[0,1) jitter — LiteLLM retry-after semantics). */
+	 *  (window remainder + U[0,1) jitter — LiteLLM retry-after semantics);
+	 *  both arms carry the W155 BudgetView so the gate stamps the
+	 *  rate-limit trio without a second counter read. */
 	check(
 		keyId: string,
 		limits: BudgetLimits,
 		bodyBytes: number,
-	): { ok: true } | { ok: false; retryAfterS: number } {
+	):
+		| { ok: true; view: BudgetView }
+		| { ok: false; retryAfterS: number; view: BudgetView } {
 		const t = this.now();
 		const win = this.current(keyId, t);
+		const view = (): BudgetView => ({
+			usedReqs: win.reqs,
+			usedTks: win.tks,
+			resetS: windowRemainderS(t),
+			resetEpochS: Math.floor(t / 60_000) * 60 + 60,
+		});
 		const estTks = Math.ceil(bodyBytes / 4);
 		if (limits.rpm !== null && win.reqs + 1 > limits.rpm) {
-			return { ok: false, retryAfterS: windowRemainderS(t) + Math.random() };
+			return {
+				ok: false,
+				retryAfterS: windowRemainderS(t) + Math.random(),
+				view: view(),
+			};
 		}
 		if (limits.tpm !== null && win.tks + estTks > limits.tpm) {
-			return { ok: false, retryAfterS: windowRemainderS(t) + Math.random() };
+			return {
+				ok: false,
+				retryAfterS: windowRemainderS(t) + Math.random(),
+				view: view(),
+			};
 		}
 		win.reqs += 1;
 		win.tks += estTks;
-		return { ok: true };
+		return { ok: true, view: view() };
 	}
 
 	/** Release an admission reservation (denial after admit). */

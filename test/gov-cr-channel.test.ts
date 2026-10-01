@@ -2,8 +2,9 @@
 // side: admin declare + list (buckle:admin only), origin recording, the
 // structural private-domain guard, probe-gated applied→verified, lifecycle
 // enforcement (no skipping; failed-from-live + escalation note).
-import { describe, expect, test } from "bun:test";
+
 import type { Database } from "bun:sqlite";
+import { describe, expect, test } from "bun:test";
 import { declareCR, transitionCR } from "../src/gov/federation-manifest.ts";
 import { startServer } from "../src/server.ts";
 
@@ -179,8 +180,8 @@ describe("w160: domain separation — hub-admin only, private content never ente
 			origin: { system: "belt", actor: "x" },
 		});
 		expect(deny.status).toBe(403);
-		const err = (await deny.json()) as { error: { message: string } };
-		expect(err.error.message).toContain("buckle:admin:WRITE_");
+		const err = (await deny.json()) as { why: string };
+		expect(err.why).toContain("buckle:admin:WRITE_");
 		const list = await fetch(`${fed.base}/federation/cr`, {
 			headers: { authorization: `Bearer ${spokeKey}` },
 		});

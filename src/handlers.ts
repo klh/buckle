@@ -6,26 +6,34 @@
 // MIT port). Errors follow the ingress dialect's error shape; unknown-usage
 // streams record requests without token columns — honest omission, never
 // estimated.
-import type { CandidateRow, CandidateTable } from "./candidates.ts";
+
 import type { AidsLedger } from "./aids.ts";
 import { aidsRoutes, applyWireAids } from "./aids-routes.ts";
-import type { Preseeder } from "./preseed.ts";
-import type { AidsPolicy } from "./policy.ts";
-import { principalOf, type Federation } from "./gov/federation.ts";
+import type { CandidateRow, CandidateTable } from "./candidates.ts";
+import {
+	allowOf,
+	methodNotAllowed,
+	options204,
+	PROBLEM_SLUGS,
+	problem,
+} from "./citizenship.ts";
+import { scoreComplexity, textFromMessages } from "./complexity.ts";
 import {
 	type DecideResult,
 	type DecisionKind,
 	latencyClass,
 	type RouteSelection,
 } from "./decide.ts";
+import { type Federation, principalOf } from "./gov/federation.ts";
 import { hintFromHeaders, type RouteHint } from "./hints.ts";
-import { type Ledger, keyIdFromAuth } from "./ledger.ts";
-import { UpstreamError, type ExecuteResult, type Router } from "./router.ts";
-import { SseSniffer } from "./sse.ts";
+import { keyIdFromAuth, type Ledger } from "./ledger.ts";
+import type { AidsPolicy } from "./policy.ts";
+import type { Preseeder } from "./preseed.ts";
+import { type ExecuteResult, type Router, UpstreamError } from "./router.ts";
 import type { Servicemon } from "./servicemon.ts";
+import { SseSniffer } from "./sse.ts";
 import type { Dialect, UpstreamPool } from "./upstreams.ts";
-import { usageFromAnthropic, usageFromOpenAI, type Usage } from "./usage.ts";
-import { scoreComplexity, textFromMessages } from "./complexity.ts";
+import { type Usage, usageFromAnthropic, usageFromOpenAI } from "./usage.ts";
 
 export interface AppDeps {
 	router: Router;
@@ -114,26 +122,20 @@ function stamped(
 	return resp;
 }
 
-/** Error body per ingress dialect (anthropic envelope vs openai error obj). */
+/** Buckle-GENERATED error body: problem+json with the stable code in `code`
+ *  (http-citizenship). Two documented exceptions: upstream pass-through
+ *  errors ride the upstream's body verbatim (client-error), and mid-stream
+ *  failures speak SSE (the status is already sent). */
 export function errorResponse(
-	dialect: Dialect,
 	status: number,
-	message: string,
+	why: string,
+	code?: string | null,
 ): Response {
-	const scrubbed = scrubText(message);
-	if (dialect === "anthropic") {
-		return Response.json(
-			{
-				type: "error",
-				error: { type: "api_error", message: scrubbed },
-			},
-			{ status },
-		);
-	}
-	return Response.json(
-		{ error: { message: scrubbed, type: "api_error", code: "upstream_error" } },
-		{ status },
-	);
+	return problem({
+		status,
+		code: code ?? `buckle.${PROBLEM_SLUGS[status] ?? "problem"}`,
+		why: code ? `belt: ${code} — ${scrubText(why)}` : scrubText(why),
+	});
 }
 
 /** /Users/<name> paths and key material never leave through an error. */
@@ -201,9 +203,7 @@ function auditAndStamp(
 		ok: false,
 		err: why,
 	});
-	const resp = code
-		? errorResponse(ctx.dialect, status, `belt: ${code} — ${why}`)
-		: errorResponse(ctx.dialect, status, why);
+	const resp = errorResponse(status, why, code);
 	return stamped(resp, ctx, { decision, code });
 }
 
@@ -363,14 +363,29 @@ function handleResult(
 ): Response | Promise<Response> {
 	if (result.kind === "aborted") return new Response(null, { status: 499 });
 	if (result.kind === "exhausted") {
-		return errorResponse(ctx.dialect, 502, result.error);
+		return errorResponse(502, result.error, "no_route");
 	}
 	if (result.kind === "client-error") {
 		// the upstream rejected the request — its error body is the most
-		// informative answer for the client; no ledger row (nothing proxied)
+		// informative answer for the client; no ledger row (nothing proxied).
+		// A 429 is the UPSTREAM's budget, never buckle's: its limit headers
+		// ride renamed x-upstream-ratelimit-* so clients never confuse whose
+		// budget fired (proxy precedence law).
+		const headers = SSE_HEADERS(result.response.headers);
+		if (result.response.status === 429) {
+			for (const [k, v] of result.response.headers) {
+				const lk = k.toLowerCase();
+				if (!lk.startsWith("x-ratelimit-") && !lk.startsWith("ratelimit-"))
+					continue;
+				headers.set(
+					`x-upstream-ratelimit-${lk.replace(/^(x-)?ratelimit-/, "")}`,
+					v,
+				);
+			}
+		}
 		return new Response(result.response.body, {
 			status: result.response.status,
-			headers: SSE_HEADERS(result.response.headers),
+			headers,
 		});
 	}
 	if (!result.stream) return jsonResponse(deps, ctx, result);
@@ -519,25 +534,48 @@ function record(deps: AppDeps, ctx: Ctx, usage: Usage | null): void {
 export function createApp(deps: AppDeps): App {
 	async function fetch(req: Request): Promise<Response> {
 		const path = new URL(req.url).pathname;
-		if (req.method === "GET" && path === "/v1/models") return models(deps);
-		if (req.method === "GET" && path === "/health") {
+		const method = req.method;
+		// http-citizenship: introspection from the one route table (the gate
+		// answers pre-auth when enabled; this covers BUCKLE_AUTH=off + tests).
+		if (method === "OPTIONS") {
+			const allow = allowOf(path);
+			if (allow !== null) return options204(allow);
+		}
+		if (method === "GET" && path === "/v1/models") return models(deps);
+		if (method === "GET" && path === "/health") {
 			return new Response("ok", { headers: { "content-type": "text/plain" } });
 		}
-		if (path.startsWith("/federation") && deps.federation) {
+		if (path.startsWith("/federation")) {
+			// bare deps 404 honestly (the AppDeps contract)
+			if (!deps.federation)
+				return problem({
+					status: 404,
+					code: "buckle.no_route",
+					why: `no route: ${method} ${path}`,
+				});
 			return deps.federation.handle(req, principalOf(req));
 		}
 		const aidsRouted = await aidsRoutes(deps, req, path);
 		if (aidsRouted) return aidsRouted;
-		if (req.method === "POST" && path === "/v1/chat/completions") {
+		if (method === "POST" && path === "/v1/chat/completions") {
 			return proxy(req, "openai", path, deps);
 		}
-		if (req.method === "POST" && path === "/v1/messages/count_tokens") {
+		if (method === "POST" && path === "/v1/messages/count_tokens") {
 			return proxy(req, "anthropic", path, deps);
 		}
-		if (req.method === "POST" && path === "/v1/messages") {
+		if (method === "POST" && path === "/v1/messages") {
 			return proxy(req, "anthropic", path, deps);
 		}
-		return errorResponse("openai", 404, `no route: ${req.method} ${path}`);
+		// known path, wrong method → 405 + Allow (admin paths stay 404 here —
+		// the gate routes them post-auth, where handleAdmin answers 405).
+		if (allowOf(path) !== null && !path.startsWith("/v1/admin")) {
+			return methodNotAllowed(path);
+		}
+		return problem({
+			status: 404,
+			code: "buckle.no_route",
+			why: `no route: ${method} ${path}`,
+		});
 	}
 	return { fetch };
 }

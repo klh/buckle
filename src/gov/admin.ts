@@ -4,8 +4,9 @@
 // READ_ for GET, WRITE_ for mutations); raw key material appears exactly
 // once — the issue response — and verify answers valid/revoked/expired
 // without echoing hashes.
-import { parseScope, scopesFromStorage } from "./scopes.ts";
+import { allowOf, methodNotAllowed, problem } from "../citizenship.ts";
 import type { Governance, Principal } from "./middleware.ts";
+import { parseScope, scopesFromStorage } from "./scopes.ts";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
@@ -13,11 +14,18 @@ function ok(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 }
 
-function bad(status: number, code: string, why: string): Response {
-	return new Response(
-		JSON.stringify({ error: { code, message: `belt: ${code} — ${why}` } }),
-		{ status, headers: JSON_HEADERS },
-	);
+function bad(
+	status: number,
+	code: string,
+	why: string,
+	path?: string,
+): Response {
+	return problem({
+		status,
+		code,
+		why: `belt: ${code} — ${why}`,
+		instance: path,
+	});
 }
 
 function str(v: unknown): string | null {
@@ -94,7 +102,9 @@ export async function handleAdmin(
 	if (method === "POST" && path === "/v1/admin/budgets/flush") {
 		return ok({ flushed: gov.budgets.flush() });
 	}
-	return bad(404, "buckle.no_route", `no admin route: ${method} ${path}`);
+	// known path, wrong method → 405 + Allow (this runs post-auth)
+	if (allowOf(path) !== null) return methodNotAllowed(path);
+	return bad(404, "buckle.no_route", `no admin route: ${method} ${path}`, path);
 }
 
 async function issueKey(

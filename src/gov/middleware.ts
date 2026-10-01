@@ -6,14 +6,21 @@
 // rejected authentications land in auth_events. PUBLIC routes: /health,
 // /status, /metrics (service telemetry, not LLM ingress).
 import { Database } from "bun:sqlite";
-import { Budgets, effectiveLimit } from "./budgets.ts";
-import { KeyStore, hashKey } from "./keys.ts";
-import { createJwtValidator, type JwtOpts, jwtScopeCheck } from "./jwt.ts";
-import { applyGovernanceSchema } from "./schema.ts";
-import { ALL_SCOPES, hasScope, scopesFromStorage } from "./scopes.ts";
-import { stashPrincipal, type Federation } from "./federation.ts";
+import {
+	allowOf,
+	options204,
+	problem,
+	type RateLimitView,
+	stampRateLimit,
+} from "../citizenship.ts";
 import type { Ledger } from "../ledger.ts";
 import type { Servicemon } from "../servicemon.ts";
+import { Budgets, type BudgetView, effectiveLimit } from "./budgets.ts";
+import { type Federation, stashPrincipal } from "./federation.ts";
+import { createJwtValidator, type JwtOpts, jwtScopeCheck } from "./jwt.ts";
+import { hashKey, KeyStore } from "./keys.ts";
+import { applyGovernanceSchema } from "./schema.ts";
+import { ALL_SCOPES, hasScope, scopesFromStorage } from "./scopes.ts";
 
 export interface GovernanceOpts {
 	dbPath: string;
@@ -41,12 +48,6 @@ export interface Principal {
 export type AuthResult =
 	| { ok: true; principal: Principal }
 	| { ok: false; status: 401; code: string; why: string };
-
-export const AUTH_ERROR_TYPES: Record<string, string> = {
-	401: "authentication_error",
-	403: "permission_error",
-	429: "rate_limit_error",
-};
 
 export interface GovernanceDeps {
 	ledger: Ledger;
@@ -217,6 +218,12 @@ export class Governance {
 	): (req: Request) => Promise<Response> {
 		return async (req: Request): Promise<Response> => {
 			const path = new URL(req.url).pathname;
+			// http-citizenship: introspection answers pre-auth from the one
+			// route table — CORS preflights never carry credentials.
+			if (req.method === "OPTIONS") {
+				const allow = allowOf(path);
+				if (allow !== null) return options204(allow);
+			}
 			const routeClass = classify(path);
 			if (routeClass === "public") return inner(req);
 			if (routeClass === "federation")
@@ -235,7 +242,7 @@ export class Governance {
 					status: auth.status,
 					why: auth.why,
 				});
-				return authError(auth.status, auth.code, auth.why);
+				return authError(auth.status, auth.code, auth.why, { instance: path });
 			}
 			return this.authorize(
 				req,
@@ -261,7 +268,9 @@ export class Governance {
 		const m = /^Bearer\s+(.+)$/i.exec(req.headers.get("authorization") ?? "");
 		if (m === null) {
 			if (req.method === "GET") return inner(req);
-			return authError(401, "buckle.auth_missing", "missing bearer token");
+			return authError(401, "buckle.auth_missing", "missing bearer token", {
+				instance: path,
+			});
 		}
 		const auth = await this.authenticate(req);
 		if (!auth.ok) {
@@ -275,7 +284,7 @@ export class Governance {
 				status: auth.status,
 				why: auth.why,
 			});
-			return authError(auth.status, auth.code, auth.why);
+			return authError(auth.status, auth.code, auth.why, { instance: path });
 		}
 		// W160 domain split at the gate: the CR-declare/list surface
 		// (/federation/cr, exact) is HUB-ADMIN — spokes report status on
@@ -347,30 +356,59 @@ export class Governance {
 		return this.admit(req, path, rid, p, limits, inner);
 	}
 
-	private admit(
+	private async admit(
 		req: Request,
 		path: string,
 		rid: string,
 		p: Principal,
 		limits: { rpm: number | null; tpm: number | null },
 		inner: (req: Request) => Response | Promise<Response>,
-	): Response | Promise<Response> {
-		if (limits.rpm !== null || limits.tpm !== null) {
-			const chk = this.budgets.check(
-				p.keyId,
-				limits,
-				Number(req.headers.get("content-length") ?? "0"),
-			);
-			if (!chk.ok) return this.rateLimited(path, rid, p, chk.retryAfterS);
-		}
-		return inner(req);
+	): Promise<Response> {
+		if (limits.rpm === null && limits.tpm === null) return inner(req);
+		const chk = this.budgets.check(
+			p.keyId,
+			limits,
+			Number(req.headers.get("content-length") ?? "0"),
+		);
+		const view = this.rateView(limits, chk.view);
+		if (!chk.ok) return this.rateLimited(path, rid, p, view, chk.retryAfterS);
+		const resp = await inner(req);
+		// http-citizenship: the trio rides every budgeted response.
+		if (view !== null) stampRateLimit(resp.headers, view);
+		return resp;
 	}
 
-	/** 429 with retry-after; audit + counter. */
+	/** The trio basis: rpm when bounded, else tpm. Unbounded principals get
+	 *  honest omission — the gate never invents numbers it does not enforce. */
+	private rateView(
+		limits: { rpm: number | null; tpm: number | null },
+		v: BudgetView,
+	): RateLimitView | null {
+		if (limits.rpm !== null)
+			return {
+				limit: limits.rpm,
+				remaining: limits.rpm - v.usedReqs,
+				resetS: v.resetS,
+				resetEpochS: v.resetEpochS,
+				policy: `rpm;q=${String(limits.rpm)}`,
+			};
+		if (limits.tpm !== null)
+			return {
+				limit: limits.tpm,
+				remaining: limits.tpm - v.usedTks,
+				resetS: v.resetS,
+				resetEpochS: v.resetEpochS,
+				policy: `tpm;q=${String(limits.tpm)}`,
+			};
+		return null;
+	}
+
+	/** 429: Retry-After + zeroed trio in both families; audit + counter. */
 	private rateLimited(
 		path: string,
 		rid: string,
 		p: Principal,
+		view: RateLimitView | null,
 		retryAfterS: number,
 	): Response {
 		this.auditDenial({
@@ -382,8 +420,11 @@ export class Governance {
 			status: 429,
 			why: "budget exceeded",
 		});
-		const resp = authError(429, "buckle.rate_limited", "budget exceeded");
-		resp.headers.set("retry-after", String(Math.ceil(retryAfterS)));
+		const resp = authError(429, "buckle.rate_limited", "budget exceeded", {
+			instance: path,
+			headers: { "retry-after": String(Math.ceil(retryAfterS)) },
+		});
+		if (view !== null) stampRateLimit(resp.headers, { ...view, remaining: 0 });
 		return resp;
 	}
 
@@ -411,34 +452,56 @@ export class Governance {
 			status: p.status,
 			why: p.why,
 		});
-		return authError(p.status, p.code, p.why);
+		return authError(p.status, p.code, p.why, { instance: p.path });
 	}
 }
 
-/** Fixed-shape auth failure envelope — stable codes, never silent. */
+const REALM = 'Bearer realm="buckle"';
+
+/** The WWW-Authenticate challenge per denial class (RFC 6750 §3): missing
+ *  credentials get a bare Bearer challenge; presented-but-invalid get
+ *  error="invalid_token"; scope denials get error="insufficient_scope". */
+function challengeFor(
+	status: 401 | 403 | 429,
+	code: string,
+): string | undefined {
+	if (status === 401)
+		return code === "buckle.auth_missing"
+			? REALM
+			: `${REALM}, error="invalid_token"`;
+	if (status === 403) return `${REALM}, error="insufficient_scope"`;
+	return undefined;
+}
+
+/** Machine-actionable recovery per denial class (agent_next_steps). */
+const AUTH_NEXT: Record<401 | 403 | 429, string[]> = {
+	401: [
+		"retry with a valid bearer token",
+		"mint a key: POST /v1/admin/keys (needs buckle:admin:WRITE_)",
+	],
+	403: ["re-mint the key with the scope named in why"],
+	429: [
+		"wait Retry-After seconds before the next dispatch",
+		"budgets reset each minute window (RateLimit-Reset)",
+	],
+};
+
+/** Fixed-shape auth failure envelope — problem+json, stable codes. */
 export function authError(
 	status: 401 | 403 | 429,
 	code: string,
 	message: string,
+	opts?: { instance?: string; headers?: Record<string, string> },
 ): Response {
-	return Response.json(
-		{
-			error: {
-				type: AUTH_ERROR_TYPES[String(status)],
-				code,
-				message,
-			},
-		},
-		{
-			status,
-			headers:
-				status === 401
-					? { "www-authenticate": "Bearer" }
-					: status === 429
-						? {}
-						: {},
-		},
-	);
+	return problem({
+		status,
+		code,
+		why: message,
+		instance: opts?.instance,
+		next: AUTH_NEXT[status],
+		challenge: challengeFor(status, code),
+		headers: opts?.headers,
+	});
 }
 
 /** Route classes at the gate: public telemetry, admin API, spoke-pull
