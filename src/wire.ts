@@ -8,6 +8,7 @@
 import { resolveAdapter } from "./adapters/index.ts";
 import type { Deployment } from "./upstreams.ts";
 import type { UpstreamRequest } from "./router.ts";
+import { poolWarm } from "./pool-warm.ts";
 
 /** Default upstream transport: adapter-built wire call + fetch with
  *  timeout + caller-signal abort. */
@@ -18,6 +19,10 @@ export async function defaultFetch(
 ): Promise<Response> {
 	const adapter = resolveAdapter(dep);
 	const wire = await adapter.buildCall(dep, req, req.body);
+	// W143 warm-rate gate: a cold origin (first dispatch since boot/pre-warm)
+	// counts one pool_refill and marks warm — the connect cost is counted,
+	// never silently mixed into the warm distribution.
+	poolWarm.observe(wire.url);
 	const signals: AbortSignal[] = [AbortSignal.timeout(timeoutMs)];
 	if (req.signal) signals.push(req.signal);
 	return fetch(wire.url, {

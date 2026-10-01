@@ -98,38 +98,103 @@ ON CONFLICT(hour_bucket, key, model_group, model) DO UPDATE SET
   requests = requests + excluded.requests
 `;
 
+/** One pending audit operation, applied in order at flush time (the
+ *  decision INSERT rides ahead of its outcome UPDATE — order is the join). */
+type AuditOp =
+	| { t: "ins"; row: RouteAuditDecision }
+	| { t: "upd"; rid: string; out: RouteAuditOutcome };
+
+export interface LedgerOptions {
+	/** async flush cadence (W143 speed §3; default 5s) */
+	flushMs?: number;
+	/** flush trigger by pending rows (default 256) */
+	flushRows?: number;
+}
+
 export class Ledger {
 	private readonly db: Database;
 	private readonly upsert: ReturnType<Database["query"]>;
+	private readonly flushMs: number;
+	private readonly flushRows: number;
+	private usageRing: Array<UsageRecord & { bucket: string }> = [];
+	private auditRing: AuditOp[] = [];
+	private timer: ReturnType<typeof setInterval> | null = null;
+	private flushQueued = false;
+	/** flush transactions that threw — the fire-and-forget counter. */
+	flushFails = 0;
 
 	constructor(
 		path: string,
 		private readonly now: () => Date = () => new Date(),
+		opts: LedgerOptions = {},
 	) {
 		this.db = new Database(path, { create: true });
 		this.db.exec("PRAGMA journal_mode = WAL");
 		this.db.exec(SCHEMA);
 		this.upsert = this.db.query(UPSERT);
+		this.flushMs = opts.flushMs ?? 5000;
+		this.flushRows = opts.flushRows ?? 256;
+		this.timer = setInterval(() => this.flush(), this.flushMs);
+		// never holds the process open (bun test, the bench harness)
+		this.timer.unref?.();
 	}
 
-	/** Upsert-add into the hour bucket for now(). */
+	/** Upsert-add into the hour bucket for now(): enqueued (bounded by the
+	 *  5s timer / the row threshold — never on the request's stack). */
 	record(rec: UsageRecord): void {
 		const bucket = `${this.now().toISOString().slice(0, 13)}:00`;
-		this.upsert.run(
-			bucket,
-			rec.key,
-			rec.group,
-			rec.model,
-			rec.in_tok,
-			rec.out_tok,
-			rec.cache_r,
-			rec.cache_c,
-			rec.requests,
-		);
+		this.usageRing.push({ ...rec, bucket });
+		if (this.usageRing.length >= this.flushRows) this.flushSoon();
 	}
 
-	/** Read-back for tests / status inspection. */
+	/** Defer one flush off the caller's stack (the threshold trigger). */
+	private flushSoon(): void {
+		if (this.flushQueued) return;
+		this.flushQueued = true;
+		const t = setTimeout(() => {
+			this.flushQueued = false;
+			this.flush();
+		}, 0);
+		t.unref?.();
+	}
+
+	/** One transaction for everything pending (W143 speed §3): usage upserts
+	 *  then audit ops in arrival order. Failure counts, never throws — the
+	 *  W140 fire-and-forget contract rides the same ring. */
+	flush(): void {
+		const usage = this.usageRing;
+		const audit = this.auditRing;
+		if (usage.length === 0 && audit.length === 0) return;
+		this.usageRing = [];
+		this.auditRing = [];
+		try {
+			this.db.transaction(() => {
+				for (const r of usage)
+					this.upsert.run(
+						r.bucket,
+						r.key,
+						r.group,
+						r.model,
+						r.in_tok,
+						r.out_tok,
+						r.cache_r,
+						r.cache_c,
+						r.requests,
+					);
+				for (const op of audit) {
+					if (op.t === "ins") this.insertAudit(op.row);
+					else this.updateAudit(op.rid, op.out);
+				}
+			})();
+		} catch {
+			this.flushFails++;
+		}
+	}
+
+	/** Read-back for tests / status inspection. Read barrier: pending rows
+	 *  flush first, so readers never see stale ring state. */
 	rows(): Array<Record<string, unknown>> {
+		this.flush();
 		const stmt = this.db.query("SELECT * FROM router_usage");
 		return stmt.all() as Array<Record<string, unknown>>;
 	}
@@ -138,56 +203,65 @@ export class Ledger {
 	// to the outcome written after completion. Fire-and-forget WAL inserts —
 	// a failed audit write never fails the route (belt precedent). ───
 
-	/** Insert the decision row (target already known at dispatch). */
+	/** Insert the decision row (target already known at dispatch): enqueued;
+	 *  the flush applies INSERTs and UPDATEs in arrival order. */
 	auditDecision(row: RouteAuditDecision): void {
-		try {
-			this.db
-				.query(INSERT_AUDIT)
-				.run(
-					row.rid,
-					row.ts,
-					row.actor,
-					row.dialect,
-					row.hint,
-					row.candidates_seen,
-					row.candidates_top,
-					row.target_kind,
-					row.target_host,
-					row.target_port,
-					row.target_model,
-					row.decision,
-					row.latency_class,
-					row.tier,
-					row.allow_cloud ? 1 : 0,
-					row.error_code,
-					row.why,
-				);
-		} catch {
-			// fire-and-forget
-		}
+		this.auditRing.push({ t: "ins", row });
+		if (this.auditRing.length >= this.flushRows) this.flushSoon();
 	}
 
-	/** Update the decision row with the outcome (joined by rid). */
+	/** The flush-time INSERT (extracted from the old inline body). */
+	private insertAudit(row: RouteAuditDecision): void {
+		this.db
+			.query(INSERT_AUDIT)
+			.run(
+				row.rid,
+				row.ts,
+				row.actor,
+				row.dialect,
+				row.hint,
+				row.candidates_seen,
+				row.candidates_top,
+				row.target_kind,
+				row.target_host,
+				row.target_port,
+				row.target_model,
+				row.decision,
+				row.latency_class,
+				row.tier,
+				row.allow_cloud ? 1 : 0,
+				row.error_code,
+				row.why,
+			);
+	}
+
+	/** Update the decision row with the outcome (joined by rid): enqueued. */
 	auditOutcome(rid: string, out: RouteAuditOutcome): void {
-		try {
-			this.db
-				.query(
-					"UPDATE route_audit SET status = ?, duration_ms = ?, ok = ?, err = ? WHERE rid = ?",
-				)
-				.run(out.status, out.duration_ms, out.ok ? 1 : 0, out.err, rid);
-		} catch {
-			// fire-and-forget
-		}
+		this.auditRing.push({ t: "upd", rid, out });
 	}
 
-	/** Read-back for tests / dashboards. */
+	/** The flush-time UPDATE (extracted from the old inline body). */
+	private updateAudit(rid: string, out: RouteAuditOutcome): void {
+		this.db
+			.query(
+				"UPDATE route_audit SET status = ?, duration_ms = ?, ok = ?, err = ? WHERE rid = ?",
+			)
+			.run(out.status, out.duration_ms, out.ok ? 1 : 0, out.err, rid);
+	}
+
+	/** Read-back for tests / dashboards. Read barrier: pending audit ops
+	 *  flush first (INSERTs ahead of their UPDATEs — order preserved). */
 	auditRows(): Array<Record<string, unknown>> {
+		this.flush();
 		return this.db
 			.query("SELECT * FROM route_audit ORDER BY ts")
 			.all() as Array<Record<string, unknown>>;
 	}
 
 	close(): void {
+		this.flush();
+		if (this.timer) clearInterval(this.timer);
+		this.timer = null;
 		this.db.close();
 	}
 }

@@ -12,6 +12,7 @@ import type { RouteHint } from "./hints.ts";
 import { createApp, type AppDeps } from "./handlers.ts";
 import type { Dialect } from "./upstreams.ts";
 import { Ledger } from "./ledger.ts";
+import { poolWarm, prewarm } from "./pool-warm.ts";
 import { createGovernance, type GovernanceOpts } from "./gov/middleware.ts";
 import { loadGatewayPolicy, loadPrefs } from "./policy.ts";
 import { Router, type RouterMetrics } from "./router.ts";
@@ -103,6 +104,20 @@ export function buildDeps(
 				.inc({ tier }),
 	};
 	const router = new Router(policy, { pool, metrics, cooldowns });
+	// W143 speed pass: the warm-rate gate servicemon counter + the boot
+	// pre-warm — one GET /v1/models per unique deployment origin (the
+	// gateway-config.ts precedent), so TLS/auth are established before the
+	// first real request. Failed origins stay cold and honestly count a
+	// pool_refill on their first dispatch.
+	poolWarm.setSink((origin) =>
+		sm
+			.counter(
+				"buckle_pool_refills_total",
+				"Cold-connect transitions on the request path (pool_refill).",
+			)
+			.inc({ origin }),
+	);
+	void prewarm(pool);
 	const decide = (input: {
 		group: string;
 		dialect: Dialect;
