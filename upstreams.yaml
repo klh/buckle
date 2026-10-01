@@ -1,0 +1,28 @@
+# Buckle upstream pool: group name == wire id (the model string clients put
+# in the request body). Loopback-only by committed default; cloud tiers are
+# DORMANT — they appear in the ladder but resolve to zero deployments until
+# an operator supplies them at runtime via BUCKLE_UPSTREAMS (a second YAML
+# merged over this one; keys come from env vars named in api_key_env, never
+# from committed files).
+#
+# Fields: url (upstream base), dialect ("openai" | "anthropic"), optional
+# model (upstream's real model id when the group alias differs — the request
+# body's model field is patched; absent = forward verbatim), optional
+# api_key_env (env var name holding the bearer key).
+version: 1
+
+groups:
+  glm-5.3-flash:
+    - url: http://127.0.0.1:8902
+      dialect: openai
+  local-swarm:
+    - url: http://127.0.0.1:8902
+      dialect: openai
+    - url: http://127.0.0.1:8901
+      dialect: openai
+    - url: http://127.0.0.1:8903
+      dialect: openai
+    - url: http://127.0.0.1:8906
+      dialect: openai
+  gpt-5.2: [] # dormant — activation is a BUCKLE_UPSTREAMS override, never a committed key
+  claude-sonnet-5: [] # dormant — same

@@ -1,0 +1,24 @@
+# Buckle's copy of the fleet routing policy — the SAME file belt loads
+# (bin/routing-policy.yaml); one file an SRE recognizes. Resolution order:
+# BUCKLE_POLICY env (or BELT_POLICY) → runtime copy in the local-llm dir →
+# this committed default. Operators edit the YAML, never code.
+#
+# Native-router semantics ported from LiteLLM 1.103.0 (MIT; pinned-source
+# verified in W126/W129): fallbacks = ordered cross-group ladders tried after
+# num_retries per tier; allowed_fails + cooldown_time = passive outlier
+# ejection; num_retries = per-tier retries whose backoff honors the upstream
+# retry-after header with jitter (utils.py::_calculate_retry_after).
+#
+# OWNER DIRECTIVES 2026-10-01 (lesson.fanout-rate-budget):
+#   - ladder: glm-5.3-flash → local-swarm → gpt-5.2 → claude-sonnet-5.
+#     NEVER flashx — same upstream family saturates together, and flashx is
+#     too expensive. Buckle refuses flashx tiers defensively even if an edit
+#     adds one.
+version: 1
+
+gateway:
+  num_retries: 1
+  allowed_fails: 3
+  cooldown_time: 30
+  fallbacks:
+    glm-5.3-flash: [local-swarm, gpt-5.2, claude-sonnet-5]
