@@ -32,19 +32,38 @@ export interface GatewayPolicy {
 	// compatible): backoff cap for absent retry-after, per-attempt timeout.
 	retry_max_delay_s?: number;
 	request_timeout_s?: number;
+	// W142 knowledge-aids policy (buckle enforcement, belt ignores): the
+	// preseed allowlist is the operator's on-switch per domain; compress is
+	// DEFAULT-OFF per the W137 economics (cache reads are 0.1x — compression
+	// must prove ROI on cache-miss traffic before an operator flips it).
+	aids?: AidsPolicy;
+}
+
+/** W142 aids policy (routing-policy.yaml `aids:` block). Belt ignores the
+ *  block; buckle refuses what policy forbids with an honest skip. */
+export interface AidsPolicy {
+	preseed?: {
+		default?: "on" | "off";
+		domains?: string[];
+		ttl_s?: number;
+		knowledge_url?: string;
+	};
+	"cache-align"?: { default?: "on" | "off" };
+	compress?: { default?: "on" | "off"; max_prose_bytes?: number };
 }
 
 interface PolicyDoc {
 	version?: number;
 	gateway?: GatewayPolicy;
 	tags?: Record<string, string[]>;
+	aids?: AidsPolicy;
 }
 
 /** Native-free defaults; the committed YAML carries the same values. */
 export const POLICY_DEFAULTS: Required<
 	Omit<
 		GatewayPolicy,
-		"fallbacks" | "tags" | "retry_max_delay_s" | "request_timeout_s"
+		"fallbacks" | "tags" | "retry_max_delay_s" | "request_timeout_s" | "aids"
 	>
 > & {
 	retry_max_delay_s: number;
@@ -61,7 +80,12 @@ export const POLICY_DEFAULTS: Required<
 export function parsePolicy(text: string): GatewayPolicy {
 	const doc = YAML.parse(text) as PolicyDoc | null;
 	const gateway = doc?.gateway ?? {};
-	return { ...POLICY_DEFAULTS, ...gateway, tags: doc?.tags ?? {} };
+	return {
+		...POLICY_DEFAULTS,
+		...gateway,
+		tags: doc?.tags ?? {},
+		aids: doc?.aids ?? {},
+	};
 }
 
 /** Resolution order: explicit path → BUCKLE_POLICY → BELT_POLICY → runtime

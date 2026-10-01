@@ -4,6 +4,8 @@
 // W124 policy file, the upstream pool, the usage ledger, the router and the
 // W125 servicemon standard (GET /status, GET /metrics) into one process.
 import { CandidateTable } from "./candidates.ts";
+import { AidsLedger } from "./aids.ts";
+import { Preseeder } from "./preseed.ts";
 import { Cooldowns } from "./cooldown.ts";
 import { decideRoute } from "./decide.ts";
 import type { RouteHint } from "./hints.ts";
@@ -59,6 +61,17 @@ export function buildDeps(
 	const ledger = new Ledger(
 		opts.dbPath ?? process.env.BUCKLE_DB ?? "buckle.db",
 	);
+	// W142 knowledge aids: metering ledger + preseed builder on the same db
+	// file (W133 wiring); policy slice from the shared routing-policy.yaml.
+	const aids = new AidsLedger(
+		opts.dbPath ?? process.env.BUCKLE_DB ?? "buckle.db",
+	);
+	const aidsPolicy = policy.aids ?? {};
+	const preseeder = new Preseeder({
+		policy: aidsPolicy,
+		knowledgeUrl:
+			aidsPolicy.preseed?.knowledge_url ?? process.env.BUCKLE_KNOWLEDGE_API,
+	});
 	const sm = servicemon({ service: "buckle", port });
 	const cooldowns = new Cooldowns(
 		policy.allowed_fails ?? 3,
@@ -101,7 +114,17 @@ export function buildDeps(
 			candidates: table.snapshot(),
 			prefs,
 		});
-	return { router, ledger, sm, pool, decide, table };
+	return {
+		router,
+		ledger,
+		aids,
+		preseeder,
+		aidsPolicy,
+		sm,
+		pool,
+		decide,
+		table,
+	};
 }
 
 /** Start buckle on the shadow port. Returns the Bun server for tests. */

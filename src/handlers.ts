@@ -7,6 +7,10 @@
 // streams record requests without token columns — honest omission, never
 // estimated.
 import type { CandidateRow, CandidateTable } from "./candidates.ts";
+import type { AidsLedger } from "./aids.ts";
+import { aidsRoutes, applyWireAids } from "./aids-routes.ts";
+import type { Preseeder } from "./preseed.ts";
+import type { AidsPolicy } from "./policy.ts";
 import {
 	type DecideResult,
 	type DecisionKind,
@@ -36,6 +40,11 @@ export interface AppDeps {
 		hintRaw: string;
 	}) => DecideResult;
 	table: CandidateTable;
+	// W142 knowledge aids: the metering ledger, the preseed builder, and the
+	// policy slice that gates them (routing-policy.yaml `aids:` block)
+	aids: AidsLedger;
+	preseeder: Preseeder;
+	aidsPolicy: AidsPolicy;
 }
 
 interface App {
@@ -223,6 +232,13 @@ async function proxy(
 	const model = typeof body.model === "string" ? body.model : "";
 	if (model.length === 0)
 		return deny(deps, ctx, 400, "missing model", null, "denied");
+	const wire = applyWireAids(
+		deps,
+		req.headers.get("x-belt-aids"),
+		body,
+		dialect,
+	);
+	body = wire.body;
 	ctx.group = model;
 	ctx.model = model;
 	ctx.hint = hint.hint;
@@ -503,6 +519,8 @@ export function createApp(deps: AppDeps): App {
 		if (req.method === "GET" && path === "/health") {
 			return new Response("ok", { headers: { "content-type": "text/plain" } });
 		}
+		const aidsRouted = await aidsRoutes(deps, req, path);
+		if (aidsRouted) return aidsRouted;
 		if (req.method === "POST" && path === "/v1/chat/completions") {
 			return proxy(req, "openai", path, deps);
 		}

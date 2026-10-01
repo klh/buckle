@@ -2,6 +2,8 @@
 // decide + router sharing one Cooldowns instance (the W140 seam,
 // server-shaped). e2e tests build deps through here.
 import { CandidateTable } from "../src/candidates.ts";
+import { AidsLedger } from "../src/aids.ts";
+import { Preseeder } from "../src/preseed.ts";
 import { Cooldowns } from "../src/cooldown.ts";
 import { decideRoute } from "../src/decide.ts";
 import type { RouteHint } from "../src/hints.ts";
@@ -45,9 +47,16 @@ export function testDeps(
 		hint: RouteHint | null;
 		hintRaw: string;
 	}) => decideRoute({ ...input, candidates: table.snapshot(), prefs });
+	const aidsPolicy = policy.aids ?? {};
 	return {
 		router,
 		ledger: new Ledger(":memory:"),
+		aids: new AidsLedger(":memory:"),
+		preseeder: new Preseeder({
+			policy: aidsPolicy,
+			knowledgeUrl: "http://127.0.0.1:1",
+		}),
+		aidsPolicy,
 		sm: servicemon({ service: "buckle-test", port: 0 }),
 		pool,
 		decide,
