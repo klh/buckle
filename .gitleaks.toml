@@ -1,0 +1,8 @@
+# gitleaks allowlist — buckle
+# docs/providers/ vendors upstream LiteLLM documentation (MIT, attributed in
+# NOTICE.md + docs/providers/LICENSE-litellm). Its curl examples carry
+# placeholder credentials (sk-anything / your-api-key / sk-admin) — flagged
+# 52x as false positives. Path-scoped so real secrets elsewhere still block.
+[allowlist]
+	description = "Vendored LiteLLM docs: placeholder example keys, not credentials"
+	paths = ['''docs/providers/.*''']
