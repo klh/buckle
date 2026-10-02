@@ -1,0 +1,353 @@
+> Source: https://docs.litellm.ai/docs/providers/snowflake  (fetched 2026-10-02)
+> LiteLLM docs — MIT-licensed project, vendored for offline reference.
+
+---
+title: "Snowflake Cortex"
+url: "/docs/providers/snowflake"
+canonical_url: "https://docs.litellm.ai/docs/providers/snowflake"
+type: "docs"
+last_updated: "2026-10-01"
+summary: "LiteLLM supports all models on the Snowflake Cortex REST API, including models from Anthropic (Claude), OpenAI (GPT), Meta (Llama), Mistral, DeepSeek, and Snowflake."
+related:
+  - "/docs/providers/synthetic"
+  - "/docs/providers/tencent"
+---
+# Snowflake Cortex
+
+> Index of all LiteLLM docs: https://docs.litellm.ai/llms.txt
+
+
+LiteLLM supports all models on the Snowflake Cortex REST API, including models from Anthropic (Claude), OpenAI (GPT), Meta (Llama), Mistral, DeepSeek, and Snowflake.
+
+| | |
+|---|---|
+| Description | Snowflake Cortex REST API provides access to leading frontier LLMs through OpenAI-compatible and Anthropic-compatible endpoints. All inference runs within Snowflake's security perimeter. |
+| Provider Route on LiteLLM | `snowflake/` |
+| Provider Docs | [Cortex REST API ↗](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-rest-api) |
+| API Endpoints | Chat Completions: `https://{account}.snowflakecomputing.com/api/v2/cortex/v1/chat/completions` <br/> Messages: `https://{account}.snowflakecomputing.com/api/v2/cortex/v1/messages` <br/> Legacy: `https://{account}.snowflakecomputing.com/api/v2/cortex/inference:complete` |
+| Supported OpenAI Endpoints | `/chat/completions`, `/completions`, `/embeddings` |
+
+Tip : We support ALL Snowflake Cortex models. Use `model=snowflake/<model-name>` as a prefix when sending LiteLLM requests.
+
+## Authentication
+
+Snowflake Cortex REST API supports three authentication methods.
+
+### Programmatic Access Token (PAT), recommended
+
+The simplest approach. Generate a PAT in Snowsight under **User Menu → My Profile → Programmatic Access Tokens**.
+
+LiteLLM reads the token from `SNOWFLAKE_JWT` (the same env var used for JWT auth) and the account from `SNOWFLAKE_ACCOUNT_ID`. Prefix the PAT with `pat/` so LiteLLM sends it as a `PROGRAMMATIC_ACCESS_TOKEN` instead of a `KEYPAIR_JWT`.
+
+```python
+import os
+from litellm import completion
+
+os.environ["SNOWFLAKE_JWT"] = "pat/<your-programmatic-access-token>"
+os.environ["SNOWFLAKE_ACCOUNT_ID"] = "<orgname>-<account_name>"
+
+response = completion(
+    model="snowflake/claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+```
+
+### JWT (Key-Pair Authentication)
+
+Generate a JWT from a Snowflake key pair. See [Key-pair authentication](https://docs.snowflake.com/en/user-guide/key-pair-auth).
+
+```python
+import os
+from litellm import completion
+
+os.environ["SNOWFLAKE_JWT"] = "<your-jwt-token>"
+os.environ["SNOWFLAKE_ACCOUNT_ID"] = "<orgname>-<account_name>"
+
+response = completion(
+    model="snowflake/claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+```
+
+### Pass credentials as parameters
+
+```python
+from litellm import completion
+
+# Using PAT
+response = completion(
+    model="snowflake/claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "Hello!"}],
+    api_key="pat/<your-pat-token>",
+    api_base="https://<account>.snowflakecomputing.com",
+)
+
+# Using JWT
+response = completion(
+    model="snowflake/claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "Hello!"}],
+    api_key="<your-jwt-token>",
+    account_id="<orgname>-<account_name>",
+)
+```
+
+When you pass `api_base`, use the account host (`https://<account>.snowflakecomputing.com`, optionally with `/api/v2`). LiteLLM appends `/api/v2` if it is missing and then the `/cortex/v1/messages`, `/cortex/v1/chat/completions` or `/cortex/inference:embed` path; an `api_base` that already contains `/cortex/v1` produces a duplicated, invalid URL.
+
+For all authentication options, see [Authenticating to Cortex REST API](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-rest-api#authenticating-cortex-rest-api-requests).
+
+## Usage
+
+**SDK**
+
+```python
+from litellm import completion
+import os
+
+os.environ["SNOWFLAKE_JWT"] = "pat/<your-pat>"
+os.environ["SNOWFLAKE_ACCOUNT_ID"] = "<orgname>-<account_name>"
+
+response = completion(
+    model="snowflake/claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "What is Snowflake Cortex?"}],
+)
+print(response.choices[0].message.content)
+```
+
+**PROXY**
+
+**1. Config**
+
+```yaml
+model_list:
+  - model_name: claude-sonnet
+    litellm_params:
+      model: snowflake/claude-sonnet-4-6
+      api_key: pat/<your-pat>
+      api_base: https://<account>.snowflakecomputing.com
+  - model_name: llama4-maverick
+    litellm_params:
+      model: snowflake/llama4-maverick
+      api_key: pat/<your-pat>
+      api_base: https://<account>.snowflakecomputing.com
+```
+
+**2. Start proxy**
+
+```bash
+litellm --config /path/to/config.yaml
+```
+
+**3. Test**
+
+```bash
+curl --location 'http://0.0.0.0:4000/chat/completions' \
+--header 'Content-Type: application/json' \
+--data '{
+    "model": "claude-sonnet",
+    "messages": [
+        {"role": "user", "content": "What is Snowflake Cortex?"}
+    ]
+}'
+```
+
+## Supported OpenAI Parameters
+
+```
+temperature, max_tokens, max_completion_tokens, top_p, stream,
+tools, tool_choice
+```
+
+Claude models also accept `thinking` (see below). `response_format` is not supported and raises an `UnsupportedParamsError` unless `drop_params` is set.
+
+## Streaming
+
+**SDK**
+
+```python
+from litellm import completion
+import os
+
+os.environ["SNOWFLAKE_JWT"] = "pat/<your-pat>"
+os.environ["SNOWFLAKE_ACCOUNT_ID"] = "<orgname>-<account_name>"
+
+response = completion(
+    model="snowflake/claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "Write a haiku about data."}],
+    stream=True,
+)
+
+for chunk in response:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="")
+```
+
+**PROXY**
+
+```bash
+curl --location 'http://0.0.0.0:4000/chat/completions' \
+--header 'Content-Type: application/json' \
+--data '{
+    "model": "claude-sonnet",
+    "messages": [{"role": "user", "content": "Write a haiku about data."}],
+    "stream": true
+}'
+```
+
+## Tool / Function Calling
+
+Supported on Claude and select models. LiteLLM automatically transforms OpenAI tool format to Snowflake's `tool_spec` format.
+
+**SDK**
+
+```python
+from litellm import completion
+import os, json
+
+os.environ["SNOWFLAKE_JWT"] = "pat/<your-pat>"
+os.environ["SNOWFLAKE_ACCOUNT_ID"] = "<orgname>-<account_name>"
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City name"}
+                },
+                "required": ["location"],
+            },
+        },
+    }
+]
+
+response = completion(
+    model="snowflake/claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "What's the weather in San Francisco?"}],
+    tools=tools,
+    tool_choice="auto",
+)
+
+print(response.choices[0].message.tool_calls)
+```
+
+**PROXY**
+
+```yaml
+model_list:
+  - model_name: claude-sonnet
+    litellm_params:
+      model: snowflake/claude-sonnet-4-6
+      api_key: pat/<your-pat>
+      api_base: https://<account>.snowflakecomputing.com
+```
+
+```bash
+curl --location 'http://0.0.0.0:4000/chat/completions' \
+--header 'Content-Type: application/json' \
+--data '{
+    "model": "claude-sonnet",
+    "messages": [{"role": "user", "content": "What is the weather in SF?"}],
+    "tools": [{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get weather for a location",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"]
+            }
+        }
+    }],
+    "tool_choice": "auto"
+}'
+```
+
+## Thinking / Reasoning
+
+Claude models on Cortex support extended thinking. Pass the provider's `thinking` parameter directly; `reasoning_effort` is not a supported param for Snowflake and raises an `UnsupportedParamsError` unless `drop_params` is set.
+
+```python
+from litellm import completion
+
+response = completion(
+    model="snowflake/claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "Solve: what is 127 * 389?"}],
+    thinking={"type": "enabled", "budget_tokens": 1024},
+)
+print(response.choices[0].message.content)
+```
+
+## Prompt Caching
+
+Snowflake Cortex supports prompt caching to reduce costs:
+
+- **OpenAI models**: Implicit caching for prompts ≥ 1,024 tokens (no code changes needed)
+- **Claude models**: Explicit caching via `cache_control` breakpoints
+
+Cached input tokens are billed at **10% of the regular input rate** (90% discount) when ≥ 1,024 tokens are cached.
+
+See [Cortex REST API Billing & Cost Analysis](https://www.snowflake.com/en/developers/guides/cortex-rest-api-billing-cost/) for details.
+
+## Embeddings
+
+```python
+from litellm import embedding
+import os
+
+os.environ["SNOWFLAKE_JWT"] = "pat/<your-pat>"
+os.environ["SNOWFLAKE_ACCOUNT_ID"] = "<orgname>-<account_name>"
+
+response = embedding(
+    model="snowflake/snowflake-arctic-embed-l-v2.0",
+    input=["Snowflake Cortex provides LLM inference"],
+)
+print(response.data[0]["embedding"][:5])
+```
+
+## Supported Models
+
+All models are available through the `snowflake/` prefix.
+
+:::tip
+For current model availability, rate limits, and pricing, see the official [Cortex REST API docs](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-rest-api) and [Service Consumption Table](https://www.snowflake.com/legal-files/CreditConsumptionTable.pdf).
+:::
+
+### Chat Completion Models
+
+| Model | `litellm` model name | Function Calling | Vision | Prompt Caching |
+|---|---|---|---|---|
+| Claude Sonnet 4.5 | `snowflake/claude-sonnet-4-5` | ✅ | ✅ | ✅ |
+| Claude Sonnet 4.6 | `snowflake/claude-sonnet-4-6` | ✅ | ✅ | ✅ |
+| Claude 4 Sonnet | `snowflake/claude-4-sonnet` | ✅ | ✅ | ✅ |
+| Claude 4 Opus | `snowflake/claude-4-opus` | ✅ | ✅ | ✅ |
+| Claude Haiku 4.5 | `snowflake/claude-haiku-4-5` | ✅ | ✅ | ✅ |
+| Claude 3.7 Sonnet | `snowflake/claude-3-7-sonnet` | ✅ | ✅ | ✅ |
+| Claude 3.5 Sonnet | `snowflake/claude-3-5-sonnet` | ✅ | ✅ | ✅ |
+| OpenAI GPT-4.1 | `snowflake/openai-gpt-4.1` | ✅ | ✅ | ✅ |
+| OpenAI GPT-5 | `snowflake/openai-gpt-5` | ✅ | ✅ | ✅ |
+| OpenAI GPT-5 Mini | `snowflake/openai-gpt-5-mini` | ✅ | | |
+| OpenAI GPT-5 Nano | `snowflake/openai-gpt-5-nano` | ✅ | | |
+| DeepSeek R1 | `snowflake/deepseek-r1` | | | |
+| Mistral Large 2 | `snowflake/mistral-large2` | ✅ | | |
+| Llama 3.1 8B | `snowflake/llama3.1-8b` | | | |
+| Llama 3.1 70B | `snowflake/llama3.1-70b` | ✅ | | |
+| Llama 3.1 405B | `snowflake/llama3.1-405b` | ✅ | | |
+| Llama 3.3 70B | `snowflake/llama3.3-70b` | ✅ | | |
+| Llama 4 Maverick | `snowflake/llama4-maverick` | ✅ | | |
+| Snowflake Llama 3.3 70B | `snowflake/snowflake-llama-3.3-70b` | ✅ | | |
+
+### Embedding Models
+
+| Model | `litellm` model name |
+|---|---|
+| Snowflake Arctic Embed L v2.0 | `snowflake/snowflake-arctic-embed-l-v2.0` |
+| Snowflake Arctic Embed M v2.0 | `snowflake/snowflake-arctic-embed-m-v2.0` |
+
+## Related pages
+
+- [Synthetic](https://docs.litellm.ai/docs/providers/synthetic.md)
+- [Tencent TokenHub](https://docs.litellm.ai/docs/providers/tencent.md)
