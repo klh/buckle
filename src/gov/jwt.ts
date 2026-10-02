@@ -43,11 +43,21 @@ export interface JwtResult {
 
 const dec = new TextDecoder();
 
-function b64urlJson(part: string): unknown {
-	const pad = (4 - (part.length % 4)) % 4;
-	const b64 = part.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat(pad);
-	const bytes = Buffer.from(b64, "base64");
-	return JSON.parse(dec.decode(bytes));
+/** Compact-JWS part → JSON object; null when undecodable or not a JSON
+ *  object. Malformed parts reject as fixed-shape 401s at the call sites —
+ *  they never throw into the gate (a garbage token is a 401, not a 500). */
+function b64urlJson(part: string): Record<string, unknown> | null {
+	try {
+		const pad = (4 - (part.length % 4)) % 4;
+		const b64 =
+			part.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat(pad);
+		const parsed: unknown = JSON.parse(dec.decode(Buffer.from(b64, "base64")));
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+			return null;
+		return parsed as Record<string, unknown>;
+	} catch {
+		return null;
+	}
 }
 
 function b64urlBytes(part: string): Uint8Array {
@@ -118,16 +128,19 @@ export function createJwtValidator(opts: JwtOpts): {
 			if (parts.length !== 3)
 				return reject("buckle.jwt_malformed", "not a compact JWS");
 			const [h64, p64, s64] = parts as [string, string, string];
-			const header = b64urlJson(h64) as {
-				alg?: string;
-				kid?: string;
-			};
+			const headerJson = b64urlJson(h64);
+			if (headerJson === null)
+				return reject("buckle.jwt_malformed", "undecodable JWT header");
+			const header = headerJson as { alg?: string; kid?: string };
 			if (header.alg !== "RS256")
 				return reject(
 					"buckle.jwt_malformed",
 					`alg ${String(header.alg)} not RS256`,
 				);
-			const claims = b64urlJson(p64) as JwtClaims;
+			const claimsJson = b64urlJson(p64);
+			if (claimsJson === null)
+				return reject("buckle.jwt_malformed", "undecodable JWT payload");
+			const claims = claimsJson as JwtClaims;
 			const uri = byIssuer.get(String(claims.iss));
 			if (uri === undefined)
 				return reject(

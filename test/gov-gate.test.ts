@@ -276,6 +276,35 @@ describe("gate: JWT validator seam (IdP-neutral claims, RS256 via JWKS)", () => 
 		gate.stop();
 		upstream.close();
 	});
+
+	test("malformed token parts → 401 buckle.jwt_malformed, never a 500 (W199.2)", async () => {
+		const upstream = await startMockUpstream(() =>
+			Response.json({ id: "jx", choices: [], usage: {} }),
+		);
+		const gate = await startGate(upstream.url, {
+			issuers: [
+				{ issuer: "https://idp.test", jwksUri: "http://127.0.0.1:1/jwks" },
+			],
+			audience: "buckle",
+		});
+		const h = b64url(
+			enc.encode(JSON.stringify({ alg: "RS256", typ: "JWT", kid: "t1" })),
+		);
+		const toks = [
+			"...",
+			"%.%.%",
+			`${h}.${b64url(enc.encode("{not-json"))}.AAAA`,
+			`${h}.${b64url(enc.encode("null"))}.AAAA`,
+		];
+		for (const tok of toks) {
+			const res = await chat(gate.base, tok);
+			expect(res.status).toBe(401);
+			const body = (await res.json()) as { code: string };
+			expect(body.code).toBe("buckle.jwt_malformed");
+		}
+		gate.stop();
+		upstream.close();
+	});
 });
 
 describe("gate: rate trio on success (W155)", () => {

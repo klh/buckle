@@ -3,6 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	FORBIDDEN_PORT,
+	MAX_REQUEST_BODY_BYTES,
 	resolvePort,
 	SHADOW_PORT,
 	startServer,
@@ -80,6 +81,31 @@ describe("e2e through Bun.serve", () => {
 		expect(st.service).toBe("buckle");
 		const metrics = await (await fetch(`${base}/metrics`)).text();
 		expect(metrics).toContain("http_requests_total");
+		server.stop(true);
+		upstream.close();
+	});
+
+	test("over-cap request body → 413 before the gate (W199.2 body cap)", async () => {
+		const upstream = await startMockUpstream(() =>
+			Response.json({ id: "x", choices: [], usage: {} }),
+		);
+		const dir = `/tmp/buckle-cap-${Date.now()}`;
+		const cfg = `groups:\n  glm-5.3-flash:\n    - url: ${upstream.url}\n      dialect: openai\n`;
+		await Bun.write(`${dir}/upstreams.yaml`, cfg);
+		const server = startServer({
+			port: 0,
+			upstreamsPath: `${dir}/upstreams.yaml`,
+			dbPath: ":memory:",
+			auth: { rootKey: "cap-key" },
+		});
+		const base = `http://127.0.0.1:${server.port}`;
+		const big = "x".repeat(MAX_REQUEST_BODY_BYTES + 1);
+		const res = await fetch(`${base}/v1/chat/completions`, {
+			method: "POST",
+			headers: { authorization: "Bearer cap-key" },
+			body: big,
+		});
+		expect(res.status).toBe(413);
 		server.stop(true);
 		upstream.close();
 	});

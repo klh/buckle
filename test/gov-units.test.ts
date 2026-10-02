@@ -9,6 +9,7 @@ import {
 	windowOf,
 	windowRemainderS,
 } from "../src/gov/budgets.ts";
+import { createJwtValidator } from "../src/gov/jwt.ts";
 import { KeyStore, hashKey } from "../src/gov/keys.ts";
 import { applyGovernanceSchema } from "../src/gov/schema.ts";
 import {
@@ -168,5 +169,39 @@ describe("budgets", () => {
 	test("team ceiling tightens the key limit via effectiveLimit", () => {
 		const out = effectiveLimit({ rpm: 100, tpm: null }, { rpm: 3, tpm: null });
 		expect(out.rpm).toBe(3);
+	});
+});
+
+describe("jwt validator: malformed parts reject, never throw (W199.2)", () => {
+	const enc = new TextEncoder();
+
+	function b64url(bytes: Uint8Array): string {
+		const raw = Buffer.from(bytes).toString("base64");
+		return raw.replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+	}
+
+	test("garbage header/payload parts reject as buckle.jwt_malformed", async () => {
+		const v = createJwtValidator({
+			issuers: [
+				{
+					issuer: "https://idp.test",
+					// unreachable; malformed rejects precede any JWKS fetch
+					jwksUri: "http://127.0.0.1:1/jwks",
+				},
+			],
+			audience: "buckle",
+		});
+		const h = b64url(enc.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
+		const toks = [
+			"...", // three empty parts — header parse hits undecodable
+			"%.%.%", // invalid base64 → empty bytes → JSON.parse("") throws
+			`${h}.${b64url(enc.encode("{not-json"))}.AAAA`, // payload not JSON
+			`${h}.${b64url(enc.encode("null"))}.AAAA`, // JSON null → not an object
+		];
+		for (const tok of toks) {
+			const r = await v.validate(tok);
+			expect(r.ok).toBe(false);
+			expect(r.code).toBe("buckle.jwt_malformed");
+		}
 	});
 });

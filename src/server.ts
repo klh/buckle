@@ -23,6 +23,12 @@ import { loadUpstreams } from "./upstreams.ts";
 export const SHADOW_PORT = 4101;
 export const FORBIDDEN_PORT = 4100;
 
+/** W199.2 request-body cap: Bun's silent default is 128 MiB — an unbounded
+ *  LLM ingress invites memory-hangup abuse. 32 MiB bounds a request while
+ *  never touching a legitimate payload (200k-token contexts ≈ 1 MiB, image
+ *  base64 well under); Bun answers 413 before the gate or ledger see it. */
+export const MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
+
 export interface ServerOpts {
 	port?: number;
 	hostname?: string;
@@ -178,6 +184,9 @@ export function startServer(
 	const server = Bun.serve({
 		hostname: opts.hostname ?? "127.0.0.1",
 		port,
+		// W199.2: the explicit body cap — over-cap requests get Bun's 413 and
+		// never reach the governance gate, the ledger or the pool.
+		maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
 		fetch: inner,
 	});
 	return Object.assign(server, { gov }) as ReturnType<typeof Bun.serve> & {
