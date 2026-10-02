@@ -418,3 +418,71 @@ Copilot :4000 "silent failure" root-caused by reproduction: trailing `/v1` in CO
 Codex ≥0.158 dropped `wire_api="chat"` (hard config error) — Responses-only; raw :89xx chat tiers unreachable from codex until litellm /v1/responses bridging (unprobed, key absent) or a buckle bridge lands.
 litellm-as-engine spec written: native rows for local tiers/anthropic, :4100-delegated rows for github_copilot/azure/bedrock/vertex/gemini long tail via existing model-patch law; copilot end-to-end acceptance test included.
 Disclosure: one accidental paid-plan request — first codex probe ran without CODEX_HOME exported, hitting the user's ChatGPT-authed default config (single "Reply OK" turn); subsequent probes were isolated and free.
+---
+
+## Caveman insertion study (code read, 2026-10-02)
+
+Read at source level: `agents/profiles/*.json`, `proxy/routing/routing.go`,
+`proxy/internal/gateway/server.go`, `packages/cli/tests/{wrap,config-file-injection}.runtime.mjs`.
+Facts below are from code/tests, not the README.
+
+**Insertion = `buildWrapEnv(agent, gatewayUrl)`, a pure function.**
+Profile in, child env out — nothing on disk is touched during a wrap.
+
+1. **Base-URL union**: sets `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
+   `OPENAI_API_BASE`, `GOOGLE_GEMINI_BASE_URL` ALL to `<gw>/w/<agent-id>`.
+   Whatever var the agent honors, it lands on the proxy; the `/w/<slug>`
+   path prefix (plus `x-cave-agent` header) is the attribution axis — one
+   proxy, per-agent telemetry joins for free.
+2. **config-file injection** (codex/qwen class): render `base_config` (the
+   user's real file, tilde-expanded) deep-merged with the profile overlay
+   (`__proto__`-guarded), write to a temp `caveman-wrap-*/<id>.json` mode
+   0600, and inject its path via the agent's own config-path env var.
+   Corrupt base → warn + fall back to generic env (fail-open, still launches).
+3. **Secrets are never materialized**: `{{cave_optional_openai_key_env}}`
+   resolves to the literal string `$ENV_NAME`; absent/blank keys are
+   omitted; optional credentials fail closed inside arrays. Generated
+   configs contain references, never values.
+4. **opencode** ignores base-URL envs → `OPENCODE_CONFIG_CONTENT` inline
+   JSON env var; a sentinel test asserts the user's `opencode.json` stays
+   byte-identical.
+5. **claude specifics**: `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` is
+   stamped only when the anthropic upstream is verifiably `api.anthropic.com`
+   (flow-style YAML counts as unverifiable → withheld); Claude
+   `remote-control` refuses a proxied base URL outright (#947) — wrap throws
+   rather than silently degrade.
+6. **MCP/delegate tools** are injected ephemerally (`--plugin-dir` for
+   claude, temp `CODEX_HOME` for codex) — never persisted into user configs.
+
+**Proxy side**: "a pure base-URL swap". Lifecycle
+match → authenticate → inspect → byte-safe transform → upstream → meter;
+record mode is always passthrough; on ANY transform problem the original
+bytes are forwarded. Durable PrefixCache keeps the provider's cache prefix
+byte-stable across turns (fails open). Its savings ledger books every row
+`inferred`, never `verified`, outside eval-gated modes.
+
+**Router side** (their `frontier-v1`): candidates carry quality lower
+confidence bounds (floor default 0.95), SLO gates, data-residency,
+denylist; Pareto-prune, then a normalized-regret α-dial (0 = most capable,
+1 = cheapest); every decision logs RejectionReasons; session pins stick for
+cache affinity; routing only runs when the proxy can rewrite the body model.
+
+**Copilot is absent** — caveman has no copilot profile at all. Our native
+BYOK proof (`COPILOT_PROVIDER_*` env, zero credits) is ahead of them there.
+
+### Adopt list (W227 follow-ups + dispatch-next)
+
+- **Base-URL union + `/w/<slug>` attribution in `laneEnv()`** — dispatch
+  env for all executors points at the buckle front with a per-lane slug;
+  board gets executor↔model↔lane joins without new plumbing.
+- **Ephemeral config-file injection over .bak edits** — for codex-class
+  agents, generate a temp config dir (0600) and point the config-path env
+  var at it; the user's real file is never mutated. Persistent enable stays
+  the explicit onboard step.
+- **Env-reference secrets** in any generated config (`$LITELLM_KEY`, not
+  the value) — matches caveman's `$ENV_NAME` rule and our no-secrets-in-repo
+  law.
+- Codex unlock note: with a temp `CODEX_HOME` + `wire_api = "responses"` +
+  `base_url = ":4100/v1"`, codex reaches the litellm engine (Responses wire
+  incl. `github_copilot/*`) even though raw chat tiers stay unreachable —
+  still unprobed (key absent), tracked in benchmarks.md OPEN row.
