@@ -7,11 +7,15 @@
 // semantics: upstream retry-after verbatim when present, capped exponential
 // 2**attempt + U[0,1) jitter when absent). Owner directive enforced
 // structurally: flashx tiers are refused in every ladder walk.
+import { type ErrorKind, normalizeUpstreamError } from "./adapters/errors.ts";
+import { resolveAdapter } from "./adapters/index.ts";
+import { deriveAdapter } from "./adapters/types.ts";
+import { bridgeRequest, bridgeResponse, crossDialectOn } from "./bridge.ts";
+import { type CandidateRow, candIdOf } from "./candidates.ts";
 import { Cooldowns, retryAfterS, retryDelayS } from "./cooldown.ts";
-import { candIdOf, type CandidateRow } from "./candidates.ts";
 import { mayEscalate, type RouteSelection } from "./decide.ts";
 import { FLASHX, type GatewayPolicy } from "./policy.ts";
-import type { Dialect, Deployment, UpstreamPool } from "./upstreams.ts";
+import type { Deployment, Dialect, UpstreamPool } from "./upstreams.ts";
 
 export { FLASHX };
 
@@ -73,7 +77,74 @@ export type TryOutcome =
 			retryAfterS: number | null;
 			clientFault: boolean;
 			exhaustTier: boolean;
+			/** W134 §1 normalized kind (adapters/errors.ts) */
+			kind: ErrorKind;
+			/** bad_request subclass: the prompt overflowed this deployment's
+			 *  window — fail over (a bigger window may fit), never bench */
+			contextWindow: boolean;
 	  };
+
+/** Walk state threaded through the ladder. ctxWindow keeps the last
+ *  context-window rejection: if every rung overflows, the client gets that
+ *  upstream 4xx (actionable) instead of a generic 502. */
+interface WalkState {
+	attempts: number;
+	status: number;
+	error: string;
+	ctxWindow?: Response;
+}
+
+/** Error bodies are small; never buffer an unbounded one. */
+const ERROR_BODY_CAP = 256 * 1024;
+
+async function readCapped(resp: Response): Promise<string> {
+	const reader = resp.body?.getReader();
+	if (!reader) return "";
+	const parts: Uint8Array[] = [];
+	let n = 0;
+	try {
+		while (n < ERROR_BODY_CAP) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			parts.push(value);
+			n += value.byteLength;
+		}
+	} catch {
+		// truncated body: classify on what arrived
+	} finally {
+		reader.cancel().catch(() => {});
+	}
+	return new TextDecoder().decode(Buffer.concat(parts));
+}
+
+/** Non-ok upstream reply → normalized RouterError (status + body signature
+ *  + retry-after header/body) and a replayable copy of the response. */
+async function classifyFailure(dep: Deployment, resp: Response) {
+	const text = await readCapped(resp);
+	let wire: unknown = null;
+	try {
+		wire = JSON.parse(text);
+	} catch {
+		// non-JSON error body: status-driven classification
+	}
+	let family: Parameters<typeof normalizeUpstreamError>[0];
+	try {
+		family = resolveAdapter(dep).family;
+	} catch {
+		family = deriveAdapter(dep.dialect);
+	}
+	const err = normalizeUpstreamError(family, resp.status, wire, resp.headers);
+	// the body is now decoded text: length/encoding headers no longer apply
+	const headers = new Headers(resp.headers);
+	headers.delete("content-length");
+	headers.delete("content-encoding");
+	const replay = new Response(text, {
+		status: resp.status,
+		statusText: resp.statusText,
+		headers,
+	});
+	return { err, replay };
+}
 
 /** Thrown when an upstream is unreachable (network/timeout); the walk
  *  catches it and keeps going (ladder), rethrows on caller abort. */
@@ -132,10 +203,18 @@ export class Router {
 		this.fetchImpl = deps.fetchImpl ?? defaultFetchImpl;
 	}
 
+	/** Same-dialect deployments first; with BUCKLE_CROSS_DIALECT=on the
+	 *  bridgeable other-dialect deployments follow (failover only). */
 	private tierCandidates(tier: string, req: UpstreamRequest): Deployment[] {
-		return this.deps.pool
+		const live = this.deps.pool
 			.deployments(tier)
-			.filter((d) => d.dialect === req.dialect && !this.cooldowns.benched(d));
+			.filter((d) => !this.cooldowns.benched(d));
+		const same = live.filter((d) => d.dialect === req.dialect);
+		if (!crossDialectOn()) return same;
+		const cross = live.filter(
+			(d) => d.dialect !== req.dialect && bridgeRequest(req, d) !== null,
+		);
+		return [...same, ...cross];
 	}
 
 	/** One upstream attempt, outcome classified for the walk. */
@@ -144,39 +223,68 @@ export class Router {
 		dep: Deployment,
 		timeoutMs: number,
 	): Promise<TryOutcome> {
+		const wireReq = bridgeRequest(req, dep);
+		if (wireReq === null)
+			throw new UpstreamError(502, `upstream ${dep.url} not bridgeable`);
+		const bridged = wireReq !== req;
 		try {
-			const resp = await this.fetchImpl(dep, req, timeoutMs);
+			const resp = await this.fetchImpl(dep, wireReq, timeoutMs);
 			if (resp.ok) {
 				this.cooldowns.success(dep);
-				return { ok: true, response: resp };
+				const response = bridged
+					? bridgeResponse(resp, req.dialect, req.body.stream === true)
+					: resp;
+				return { ok: true, response };
 			}
-			const ra = retryAfterS(resp.headers, this.now);
-			const bad400 =
-				resp.status === 400 || resp.status === 413 || resp.status === 422;
-			if (bad400) {
+			const { err, replay } = await classifyFailure(dep, resp);
+			const ra = err.retryAfterS ?? retryAfterS(resp.headers, this.now);
+			const base = {
+				ok: false as const,
+				response: replay,
+				status: resp.status,
+				retryAfterS: ra,
+				kind: err.kind,
+				contextWindow: err.contextWindow,
+			};
+			if (bridged && err.kind === "bad_request" && resp.status < 500) {
+				// a 4xx on a translated hop may be the bridge's doing and its
+				// body speaks the other dialect: skip the hop, never bench it
 				return {
-					ok: false,
-					response: resp,
-					status: resp.status,
+					...base,
+					contextWindow: false,
+					error: `bridged upstream ${dep.url} rejected the request (${String(resp.status)})`,
+					clientFault: false,
+					exhaustTier: true,
+				};
+			}
+			if (err.contextWindow) {
+				// the deployment is healthy, the prompt is too big for it
+				return {
+					...base,
+					error: `upstream ${dep.url} context window exceeded (${String(resp.status)})`,
+					clientFault: false,
+					exhaustTier: true,
+				};
+			}
+			// a 5xx is the upstream's fault whatever its body claims; 404 is a
+			// deployment-level miss (model absent there) — both fail over
+			const clientFault =
+				err.kind === "bad_request" && resp.status < 500 && resp.status !== 404;
+			if (clientFault) {
+				return {
+					...base,
 					error: `upstream rejected the request (${String(resp.status)})`,
-					retryAfterS: ra,
 					clientFault: true,
 					exhaustTier: false,
 				};
 			}
-			resp.body?.cancel().catch(() => {});
 			this.cooldowns.failure(dep);
 			this.metrics?.cooldown(`${dep.group}|${dep.url}`);
-			const authish =
-				resp.status === 401 || resp.status === 403 || resp.status === 404;
 			return {
-				ok: false,
-				response: resp,
-				status: resp.status,
+				...base,
 				error: `upstream ${dep.url} returned ${String(resp.status)}`,
-				retryAfterS: ra,
 				clientFault: false,
-				exhaustTier: authish,
+				exhaustTier: !err.retryable,
 			};
 		} catch (e) {
 			if (req.signal?.aborted) throw e;
@@ -191,7 +299,7 @@ export class Router {
 		req: UpstreamRequest,
 		tier: string,
 		candidates: Deployment[],
-		st: { attempts: number; status: number; error: string },
+		st: WalkState,
 	): Promise<ExecuteResult | null> {
 		const retries = this.policy.num_retries ?? 1;
 		const capS = this.policy.retry_max_delay_s ?? 8;
@@ -223,6 +331,7 @@ export class Router {
 					attempts: st.attempts,
 				};
 			}
+			if (r.contextWindow) st.ctxWindow = r.response;
 			if (r.exhaustTier) break;
 			await this.sleepMs(
 				retryDelayS(attempt, r.retryAfterS, this.rng, capS) * 1000,
@@ -243,7 +352,7 @@ export class Router {
 				status: 502,
 				error: `no healthy upstream for ${req.group}`,
 			});
-		const st = {
+		const st: WalkState = {
 			attempts: 0,
 			status: 502,
 			error: `no healthy upstream for ${req.group}`,
@@ -260,7 +369,7 @@ export class Router {
 			const r = await this.attemptTier(req, tier, candidates, st);
 			if (r !== null) return r;
 		}
-		return { kind: "exhausted", ...st };
+		return exhausted(st);
 	}
 
 	/** W140 selection walk: deliver the selected candidate first, then the
@@ -268,10 +377,10 @@ export class Router {
 	 *  closed — ladder rungs would substitute beyond the hint (law 2). */
 	private async walkSelected(
 		req: UpstreamRequest,
-		st: { attempts: number; status: number; error: string },
+		st: WalkState,
 	): Promise<ExecuteResult> {
 		const sel = req.sel;
-		if (!sel) return { kind: "exhausted", ...st }; // unreachable (guarded)
+		if (!sel) return exhausted(st); // unreachable (guarded)
 		const tried = new Set<string>();
 		// The escalation law applies to any post-failure local→cloud hop:
 		// only the hint's head (and must's demanded set) bypass the tier
@@ -296,7 +405,7 @@ export class Router {
 		}
 		if (sel.verb === "must" && sel.fit === sel.total && sel.total > 0) {
 			// must-domain closed: no substitution beyond the hint (law 2)
-			return { kind: "exhausted", ...st };
+			return exhausted(st);
 		}
 		return this.gatedLadder(req, sel, st, tried);
 	}
@@ -307,7 +416,7 @@ export class Router {
 	private async gatedLadder(
 		req: UpstreamRequest,
 		sel: RouteSelection,
-		st: { attempts: number; status: number; error: string },
+		st: WalkState,
 		tried: Set<string>,
 	): Promise<ExecuteResult> {
 		const tiers = [req.group, ...(this.policy.fallbacks?.[req.group] ?? [])];
@@ -335,8 +444,26 @@ export class Router {
 			const r = await this.attemptTier(req, tier, candidates, st);
 			if (r !== null) return r;
 		}
-		return { kind: "exhausted", ...st };
+		return exhausted(st);
 	}
+}
+
+/** End of a walk with nothing delivered: an all-rungs context-window
+ *  overflow answers the upstream's 4xx; anything else is exhausted. */
+function exhausted(st: WalkState): ExecuteResult {
+	if (st.ctxWindow)
+		return {
+			kind: "client-error",
+			response: st.ctxWindow,
+			tier: "",
+			attempts: st.attempts,
+		};
+	return {
+		kind: "exhausted",
+		status: st.status,
+		error: st.error,
+		attempts: st.attempts,
+	};
 }
 
 async function defaultFetchImpl(

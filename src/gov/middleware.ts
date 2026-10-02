@@ -6,6 +6,7 @@
 // rejected authentications land in auth_events. PUBLIC routes: /health,
 // /status, /metrics (service telemetry, not LLM ingress).
 import { Database } from "bun:sqlite";
+import { timingSafeEqual } from "node:crypto";
 import {
 	allowOf,
 	options204,
@@ -146,7 +147,7 @@ export class Governance {
 				code: "buckle.auth_malformed",
 				why: "empty bearer token",
 			};
-		if (this.rootHash !== null && hashKey(token) === this.rootHash) {
+		if (this.rootHash !== null && rootMatches(token, this.rootHash)) {
 			return {
 				ok: true,
 				principal: {
@@ -543,4 +544,11 @@ export function createGovernance(
 	opts: GovernanceOpts,
 ): Governance {
 	return new Governance(deps, opts);
+}
+
+/** Constant-time root-key check over the fixed-length sha-256 hex digests. */
+export function rootMatches(token: string, rootHash: string): boolean {
+	const a = Buffer.from(hashKey(token), "utf8");
+	const b = Buffer.from(rootHash, "utf8");
+	return a.length === b.length && timingSafeEqual(a, b);
 }

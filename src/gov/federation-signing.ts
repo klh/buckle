@@ -58,6 +58,21 @@ function kidOf(pub: Record<string, string>): string {
 	return `bkfed-${createHash("sha256").update(n).digest("hex").slice(0, 12)}`;
 }
 
+/** Attacker-controlled protected header → object, or null (never throws:
+ *  a malformed JWS is a refusal, not a crash path). */
+export function parseJwsHeader(
+	h: string,
+): { alg?: unknown; kid?: unknown } | null {
+	try {
+		const v: unknown = JSON.parse(Buffer.from(h, "base64url").toString("utf8"));
+		return v !== null && typeof v === "object" && !Array.isArray(v)
+			? (v as { alg?: unknown; kid?: unknown })
+			: null;
+	} catch {
+		return null;
+	}
+}
+
 /** W193: spoke-side parity — verify a detached JWS over the exact body
  *  bytes against a JWKS doc. Spokes and the sim smoke import this; the
  *  buckle test suite uses it for the end-to-end check. */
@@ -69,22 +84,25 @@ export async function verifyJwsDetached(
 	const [h, p, s] = jws.split(".");
 	if (p !== "" || h === undefined || s === undefined)
 		return { ok: false, why: "malformed JWS (want compact, detached)" };
-	const header = JSON.parse(Buffer.from(h, "base64url").toString("utf8")) as {
-		alg?: string;
-		kid?: string;
-	};
+	const header = parseJwsHeader(h);
+	if (header === null) return { ok: false, why: "malformed JWS header" };
 	if (header.alg !== "RS256")
 		return { ok: false, why: `alg ${String(header.alg)} refused` };
 	const key = jwks.keys.find((k) => k.kid === header.kid);
 	if (key === undefined)
 		return { ok: false, why: `no JWKS key for kid ${String(header.kid)}` };
 	const input = `${h}.${Buffer.from(body).toString("base64url")}`;
-	const good = createVerify("RSA-SHA256")
-		.update(input)
-		.verify(
-			createPublicKey({ key: key as never, format: "jwk" }),
-			Buffer.from(s, "base64url"),
-		);
+	let good: boolean;
+	try {
+		good = createVerify("RSA-SHA256")
+			.update(input)
+			.verify(
+				createPublicKey({ key: key as never, format: "jwk" }),
+				Buffer.from(s, "base64url"),
+			);
+	} catch {
+		return { ok: false, why: "unusable JWKS key" };
+	}
 	return good
 		? { ok: true, why: null }
 		: { ok: false, why: "signature mismatch" };
@@ -172,11 +190,8 @@ export class ManifestSigner {
 	verify(body: Uint8Array, jws: string): boolean {
 		const [h, p, s] = jws.split(".");
 		if (p !== "" || h === undefined || s === undefined) return false;
-		const header = JSON.parse(Buffer.from(h, "base64url").toString("utf8")) as {
-			alg?: string;
-			kid?: string;
-		};
-		if (header.alg !== "RS256") return false;
+		const header = parseJwsHeader(h);
+		if (header === null || header.alg !== "RS256") return false;
 		const key = createPublicKey({ key: this.pubJwk, format: "jwk" });
 		const input = `${h}.${b64url(body)}`;
 		return createVerify("RSA-SHA256")

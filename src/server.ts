@@ -3,24 +3,25 @@
 // — flag, env, or code — until the owner flips it deliberately. Wires the
 // W124 policy file, the upstream pool, the usage ledger, the router and the
 // W125 servicemon standard (GET /status, GET /metrics) into one process.
-import { CandidateTable } from "./candidates.ts";
-import { AidsLedger } from "./aids.ts";
-import { Preseeder } from "./preseed.ts";
-import { Cooldowns } from "./cooldown.ts";
-import { decideRoute } from "./decide.ts";
-import type { RouteHint } from "./hints.ts";
-import { createApp, type AppDeps } from "./handlers.ts";
-import type { Dialect } from "./upstreams.ts";
-import { Ledger } from "./ledger.ts";
-import { poolWarm, prewarm } from "./pool-warm.ts";
-import { createGovernance, type GovernanceOpts } from "./gov/middleware.ts";
-import { Federation } from "./gov/federation.ts";
-import { ManifestSigner } from "./gov/federation-signing.ts";
+
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { AidsLedger } from "./aids.ts";
+import { CandidateTable } from "./candidates.ts";
+import { Cooldowns } from "./cooldown.ts";
+import { decideRoute } from "./decide.ts";
+import { Federation } from "./gov/federation.ts";
+import { ManifestSigner } from "./gov/federation-signing.ts";
+import { createGovernance, type GovernanceOpts } from "./gov/middleware.ts";
+import { type AppDeps, createApp } from "./handlers.ts";
+import type { RouteHint } from "./hints.ts";
+import { Ledger } from "./ledger.ts";
 import { loadGatewayPolicy, loadPrefs } from "./policy.ts";
+import { poolWarm, prewarm } from "./pool-warm.ts";
+import { Preseeder } from "./preseed.ts";
 import { Router, type RouterMetrics } from "./router.ts";
 import { servicemon } from "./servicemon.ts";
+import type { Dialect } from "./upstreams.ts";
 import { loadUpstreams } from "./upstreams.ts";
 
 export const SHADOW_PORT = 4101;
@@ -72,8 +73,19 @@ export function buildDeps(
 	const policy = loadGatewayPolicy(opts.policyPath);
 	const pool = loadUpstreams(opts.upstreamsPath);
 	const prefs = loadPrefs(opts.prefsPath);
+	const sm = servicemon({ service: "buckle", port });
 	const ledger = new Ledger(
 		opts.dbPath ?? process.env.BUCKLE_DB ?? "buckle.db",
+		undefined,
+		{
+			onDrop: (kind, n) =>
+				sm
+					.counter(
+						"buckle_ledger_dropped_total",
+						"Ledger rows dropped after bounded flush retries.",
+					)
+					.inc({ kind }, n),
+		},
 	);
 	// W142 knowledge aids: metering ledger + preseed builder on the same db
 	// file (W133 wiring); policy slice from the shared routing-policy.yaml.
@@ -86,7 +98,6 @@ export function buildDeps(
 		knowledgeUrl:
 			aidsPolicy.preseed?.knowledge_url ?? process.env.BUCKLE_KNOWLEDGE_API,
 	});
-	const sm = servicemon({ service: "buckle", port });
 	const cooldowns = new Cooldowns(
 		policy.allowed_fails ?? 3,
 		policy.cooldown_time ?? 30,

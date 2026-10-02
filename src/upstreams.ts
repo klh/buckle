@@ -4,8 +4,10 @@
 // a BUCKLE_UPSTREAMS override file merged over the default by group name.
 // Keys NEVER live in committed files: api_key_env names an env var read at
 // request time.
-import { YAML } from "bun";
+
 import { existsSync, readFileSync } from "node:fs";
+import { YAML } from "bun";
+import { validateDeploymentEgress } from "./adapters/egress.ts";
 import { resolveAdapter } from "./adapters/index.ts";
 import { deriveAdapter } from "./adapters/types.ts";
 
@@ -86,9 +88,10 @@ function poolFrom(doc: UpstreamsDoc): UpstreamPool {
 				// startup fatal (W134 §4.2): unknown adapter names — and known
 				// tier-2 families with no adapter yet — fail closed here,
 				// naming the offending group, never a silent passthrough.
+				// Egress law too: base URL + token_host (adapters/egress.ts).
 				if (dep.adapter === undefined) dep.adapter = deriveAdapter(dep.dialect);
 				try {
-					resolveAdapter(dep);
+					validateDeploymentEgress(resolveAdapter(dep).family, dep);
 				} catch (e) {
 					throw new Error(
 						`upstreams: group "${group}": ${e instanceof Error ? e.message : String(e)}`,

@@ -1,6 +1,7 @@
 # buckle
 
-LLM router plane: two-dialect transport, adapters, routing laws,
+LLM router plane: dual-dialect pass-through (cross-dialect failover
+opt-in: `BUCKLE_CROSS_DIALECT=on`), adapters, routing laws,
 governance, knowledge aids. Companion of belt (fleet) + suspenders
 (control plane). Design docs live in suspenders `docs/design/buckle/`.
 

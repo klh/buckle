@@ -2,7 +2,7 @@
 // count smoke, catch-all derivation, and one tier-2 adapter per family
 // (azure Entra/api-key, bedrock SigV4 by independent-implementation
 // agreement, vertex SA-JWT/token exchange against local mocks).
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
 import { AZURE_OPENAI, isAzureConfig } from "../src/adapters/azure-openai.ts";
 import { BEDROCK, sigv4Sign } from "../src/adapters/bedrock.ts";
@@ -15,7 +15,7 @@ import {
 
 import { resolveAdapter } from "../src/adapters/index.ts";
 
-import { VERTEX, gcpToken, saJwt } from "../src/adapters/vertex.ts";
+import { gcpToken, saJwt, VERTEX } from "../src/adapters/vertex.ts";
 
 /** fresh exportable RSA keypair as a SA-style PKCS8 PEM (per-call: unique
  *  client_email + fresh key keeps the module-level token caches disjoint
@@ -266,6 +266,13 @@ describe("W150 bedrock", () => {
 });
 
 describe("W150 vertex", () => {
+	// loopback token mocks are an explicit opt-in (adapters/egress.ts)
+	beforeAll(() => {
+		process.env.BUCKLE_TOKEN_HOST_LOOPBACK = "on";
+	});
+	afterAll(() => {
+		delete process.env.BUCKLE_TOKEN_HOST_LOOPBACK;
+	});
 	test("saJwt: RS256 signature verifies against the SA public key", async () => {
 		const kp = await crypto.subtle.generateKey(
 			{

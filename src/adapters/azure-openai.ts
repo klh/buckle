@@ -6,6 +6,11 @@
 // carries NAMES only.
 import type { UpstreamRequest } from "../router.ts";
 import type { Deployment } from "../upstreams.ts";
+import {
+	AZURE_TOKEN_HOSTS,
+	TOKEN_FETCH_TIMEOUT_MS,
+	tokenOrigin,
+} from "./egress.ts";
 import { normalizeUpstreamError } from "./errors.ts";
 import { OPENAI_COMPAT } from "./openai-compat.ts";
 import type { ChatAdapter, WireCall } from "./types.ts";
@@ -15,7 +20,8 @@ export interface EntraConfig {
 	client_id: string;
 	/** env var NAME holding the client secret — never the secret */
 	client_secret_env: string;
-	/** override for tests/local — defaults to login.microsoftonline.com */
+	/** override — https + allowlisted Entra host only (egress.ts); loopback
+	 *  mocks need BUCKLE_TOKEN_HOST_LOOPBACK=on. Default login.microsoftonline.com */
 	token_host?: string;
 }
 
@@ -61,11 +67,18 @@ async function refreshEntra(
 	fetchImpl: typeof fetch,
 ): Promise<string> {
 	const key = `${cfg.tenant_id}:${cfg.client_id}`;
-	const host = cfg.token_host ?? "login.microsoftonline.com";
-	// token_host may carry a scheme (tests/local mocks serve plain http)
-	const tokenUrl = host.startsWith("http")
-		? `${host}/${cfg.tenant_id}/oauth2/v2.0/token`
-		: `https://${host}/${cfg.tenant_id}/oauth2/v2.0/token`;
+	let tokenUrl: string;
+	try {
+		const origin = tokenOrigin(
+			cfg.token_host,
+			AZURE_TOKEN_HOSTS[0],
+			AZURE_TOKEN_HOSTS,
+		);
+		tokenUrl = `${origin}/${encodeURIComponent(cfg.tenant_id)}/oauth2/v2.0/token`;
+	} catch (e) {
+		entraTokens.delete(key);
+		throw new Error(`entra token refresh refused: ${(e as Error).message}`);
+	}
 
 	const form = new URLSearchParams({
 		grant_type: "client_credentials",
@@ -75,7 +88,11 @@ async function refreshEntra(
 	});
 	let r: Response;
 	try {
-		r = await fetchImpl(tokenUrl, { method: "POST", body: form });
+		r = await fetchImpl(tokenUrl, {
+			method: "POST",
+			body: form,
+			signal: AbortSignal.timeout(TOKEN_FETCH_TIMEOUT_MS),
+		});
 	} catch (e) {
 		entraTokens.delete(key);
 		throw new Error(`entra token refresh failed: ${(e as Error).message}`);
@@ -84,7 +101,7 @@ async function refreshEntra(
 		entraTokens.delete(key);
 		throw new Error(`entra token refresh failed (${String(r.status)})`);
 	}
-	const j = (await r.json()) as { access_token?: string };
+	const j = (await r.json().catch(() => ({}))) as { access_token?: string };
 	if (typeof j.access_token !== "string") {
 		entraTokens.delete(key);
 		throw new Error("entra token refresh: no access_token in response");

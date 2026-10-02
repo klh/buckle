@@ -8,7 +8,12 @@
 // only, secrets read at request time.
 import type { UpstreamRequest } from "../router.ts";
 import type { Deployment } from "../upstreams.ts";
-import { RouterError, normalizeUpstreamError } from "./errors.ts";
+import {
+	GCP_TOKEN_HOSTS,
+	TOKEN_FETCH_TIMEOUT_MS,
+	tokenOrigin,
+} from "./egress.ts";
+import { normalizeUpstreamError, RouterError } from "./errors.ts";
 import { OPENAI_COMPAT } from "./openai-compat.ts";
 import type { ChatAdapter, WireCall } from "./types.ts";
 
@@ -21,7 +26,8 @@ export interface VertexAdapterConfig {
 	service_account_json_env?: string;
 	/** env var NAME for the api-key profile — default GEMINI_API_KEY */
 	api_key_env?: string;
-	/** override for tests/local — defaults oauth2.googleapis.com */
+	/** override — https + allowlisted host only (egress.ts); loopback mocks
+	 *  need BUCKLE_TOKEN_HOST_LOOPBACK=on. Default oauth2.googleapis.com */
 	token_host?: string;
 }
 
@@ -108,15 +114,17 @@ export async function gcpToken(
 	if (!sa.client_email || !sa.private_key) {
 		throw new RouterError("auth", 0, `vertex: ${jsonEnv} missing fields`);
 	}
-	const tokenHost = cfg.token_host ?? "oauth2.googleapis.com";
-	const cacheKey = `${sa.client_email}:${tokenHost}`;
+	let origin: string;
+	try {
+		origin = tokenOrigin(cfg.token_host, GCP_TOKEN_HOSTS[0], GCP_TOKEN_HOSTS);
+	} catch (e) {
+		throw new RouterError("auth", 0, `vertex: ${(e as Error).message}`);
+	}
+	const cacheKey = `${sa.client_email}:${origin}`;
 	const hit = gcpTokens.get(cacheKey);
 	if (hit && hit.exp > Date.now() + 60_000) return hit.token;
 	if (hit?.inflight) return hit.inflight;
-	// token_host may carry a scheme (tests/local mocks serve plain http)
-	const aud = tokenHost.startsWith("http")
-		? `${tokenHost}/token`
-		: `https://${tokenHost}/token`;
+	const aud = `${origin}/token`;
 
 	const p = (async (): Promise<string> => {
 		const jwt = await saJwt({
@@ -132,6 +140,13 @@ export async function gcpToken(
 				grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
 				assertion: jwt,
 			}),
+			signal: AbortSignal.timeout(TOKEN_FETCH_TIMEOUT_MS),
+		}).catch((e: unknown) => {
+			throw new RouterError(
+				"auth",
+				0,
+				`vertex: token exchange unreachable (${e instanceof Error ? e.message : "fetch failed"})`,
+			);
 		});
 		if (!r.ok) {
 			throw new RouterError(
@@ -140,7 +155,7 @@ export async function gcpToken(
 				`vertex: token exchange failed (${String(r.status)})`,
 			);
 		}
-		const j = (await r.json()) as { access_token?: string };
+		const j = (await r.json().catch(() => ({}))) as { access_token?: string };
 		if (typeof j.access_token !== "string") {
 			throw new RouterError("auth", 0, "vertex: no access_token");
 		}
@@ -149,7 +164,11 @@ export async function gcpToken(
 			exp: Date.now() + 3300_000,
 		});
 		return j.access_token;
-	})();
+	})().catch((e: unknown) => {
+		// a failed exchange must not pin a rejected inflight in the cache
+		gcpTokens.delete(cacheKey);
+		throw e;
+	});
 	if (hit) hit.inflight = p;
 	else gcpTokens.set(cacheKey, { token: "", exp: 0, inflight: p });
 	return p;

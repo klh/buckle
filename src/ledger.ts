@@ -109,19 +109,30 @@ export interface LedgerOptions {
 	flushMs?: number;
 	/** flush trigger by pending rows (default 256) */
 	flushRows?: number;
+	/** flush attempts a row survives before it is dropped (default 5) */
+	maxFlushAttempts?: number;
+	/** drop observer — the servicemon counter seam (buckle_ledger_dropped_total) */
+	onDrop?: (kind: "usage" | "audit", n: number) => void;
 }
+
+/** A ring entry with its failed-flush count (bounded retry). */
+type Pending<T> = { v: T; tries: number };
 
 export class Ledger {
 	private readonly db: Database;
 	private readonly upsert: ReturnType<Database["query"]>;
 	private readonly flushMs: number;
 	private readonly flushRows: number;
-	private usageRing: Array<UsageRecord & { bucket: string }> = [];
-	private auditRing: AuditOp[] = [];
+	private readonly maxAttempts: number;
+	private readonly onDrop?: (kind: "usage" | "audit", n: number) => void;
+	private usageRing: Array<Pending<UsageRecord & { bucket: string }>> = [];
+	private auditRing: Array<Pending<AuditOp>> = [];
 	private timer: ReturnType<typeof setInterval> | null = null;
 	private flushQueued = false;
 	/** flush transactions that threw — the fire-and-forget counter. */
 	flushFails = 0;
+	/** rows dropped after maxFlushAttempts failed flushes (usage + audit). */
+	dropped = 0;
 
 	constructor(
 		path: string,
@@ -134,6 +145,8 @@ export class Ledger {
 		this.upsert = this.db.query(UPSERT);
 		this.flushMs = opts.flushMs ?? 5000;
 		this.flushRows = opts.flushRows ?? 256;
+		this.maxAttempts = Math.max(1, opts.maxFlushAttempts ?? 5);
+		this.onDrop = opts.onDrop;
 		this.timer = setInterval(() => this.flush(), this.flushMs);
 		// never holds the process open (bun test, the bench harness)
 		this.timer.unref?.();
@@ -143,7 +156,7 @@ export class Ledger {
 	 *  5s timer / the row threshold — never on the request's stack). */
 	record(rec: UsageRecord): void {
 		const bucket = `${this.now().toISOString().slice(0, 13)}:00`;
-		this.usageRing.push({ ...rec, bucket });
+		this.usageRing.push({ v: { ...rec, bucket }, tries: 0 });
 		if (this.usageRing.length >= this.flushRows) this.flushSoon();
 	}
 
@@ -159,8 +172,11 @@ export class Ledger {
 	}
 
 	/** One transaction for everything pending (W143 speed §3): usage upserts
-	 *  then audit ops in arrival order. Failure counts, never throws — the
-	 *  W140 fire-and-forget contract rides the same ring. */
+	 *  then audit ops in arrival order. Failure never throws (the W140
+	 *  fire-and-forget contract) but never loses rows silently either: the
+	 *  transaction rolled back, so the batch is requeued ahead of newer rows
+	 *  and retried; a row is dropped (counted in `dropped` + onDrop) only
+	 *  after maxFlushAttempts failed flushes. */
 	flush(): void {
 		const usage = this.usageRing;
 		const audit = this.auditRing;
@@ -169,7 +185,7 @@ export class Ledger {
 		this.auditRing = [];
 		try {
 			this.db.transaction(() => {
-				for (const r of usage)
+				for (const { v: r } of usage)
 					this.upsert.run(
 						r.bucket,
 						r.key,
@@ -181,14 +197,40 @@ export class Ledger {
 						r.cache_c,
 						r.requests,
 					);
-				for (const op of audit) {
+				for (const { v: op } of audit) {
 					if (op.t === "ins") this.insertAudit(op.row);
 					else this.updateAudit(op.rid, op.out);
 				}
 			})();
 		} catch {
 			this.flushFails++;
+			this.usageRing = [...this.requeue("usage", usage), ...this.usageRing];
+			this.auditRing = [...this.requeue("audit", audit), ...this.auditRing];
 		}
+	}
+
+	/** Failed batch → survivors (tries+1 < max) for the ring head; the rest
+	 *  are dropped and counted. */
+	private requeue<T>(
+		kind: "usage" | "audit",
+		batch: Array<Pending<T>>,
+	): Array<Pending<T>> {
+		const keep: Array<Pending<T>> = [];
+		let lost = 0;
+		for (const p of batch) {
+			if (p.tries + 1 >= this.maxAttempts) lost++;
+			else keep.push({ v: p.v, tries: p.tries + 1 });
+		}
+		if (lost > 0) {
+			this.dropped += lost;
+			this.onDrop?.(kind, lost);
+		}
+		return keep;
+	}
+
+	/** Rows waiting for the next flush (usage + audit ops). */
+	pending(): number {
+		return this.usageRing.length + this.auditRing.length;
 	}
 
 	/** Read-back for tests / status inspection. Read barrier: pending rows
@@ -206,7 +248,7 @@ export class Ledger {
 	/** Insert the decision row (target already known at dispatch): enqueued;
 	 *  the flush applies INSERTs and UPDATEs in arrival order. */
 	auditDecision(row: RouteAuditDecision): void {
-		this.auditRing.push({ t: "ins", row });
+		this.auditRing.push({ v: { t: "ins", row }, tries: 0 });
 		if (this.auditRing.length >= this.flushRows) this.flushSoon();
 	}
 
@@ -237,7 +279,7 @@ export class Ledger {
 
 	/** Update the decision row with the outcome (joined by rid): enqueued. */
 	auditOutcome(rid: string, out: RouteAuditOutcome): void {
-		this.auditRing.push({ t: "upd", rid, out });
+		this.auditRing.push({ v: { t: "upd", rid, out }, tries: 0 });
 	}
 
 	/** The flush-time UPDATE (extracted from the old inline body). */
@@ -259,7 +301,10 @@ export class Ledger {
 	}
 
 	close(): void {
-		this.flush();
+		// drain: each failed flush ages the batch, so this ends within
+		// maxAttempts passes — survivors land, the rest are counted drops
+		for (let i = 0; i < this.maxAttempts && this.pending() > 0; i++)
+			this.flush();
 		if (this.timer) clearInterval(this.timer);
 		this.timer = null;
 		this.db.close();

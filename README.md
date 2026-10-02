@@ -1,6 +1,6 @@
 # buckle
 
-LLM gateway: two-dialect transport + governance in one Bun/TypeScript
+LLM gateway: dual-dialect pass-through + governance in one Bun/TypeScript
 process. The LiteLLM-replacement serving layer of the
 [klh agent stack](https://github.com/klh/suspenders) — belt routes,
 buckle serves.
@@ -30,8 +30,13 @@ flowchart LR
 
 ## What it does
 
-- **Two wire dialects** — OpenAI `/v1/chat/completions` and Anthropic
-  `/v1/messages` — with SSE pass-through and a usage-only tee.
+- **Dual-dialect pass-through; cross-dialect failover opt-in** — OpenAI
+  `/v1/chat/completions` and Anthropic `/v1/messages`, each routed to
+  upstreams of its own dialect with SSE pass-through and a usage-only tee.
+  `BUCKLE_CROSS_DIALECT=on` (default off) lets a ladder rung fail over to
+  the other dialect through the tool/stream transforms
+  (`src/bridge.ts`): anthropic client → openai upstream (JSON +
+  streaming), openai client → anthropic upstream (JSON only).
 - **Upstreams are data, not code** — `upstreams.yaml` group rows
   (`url`, `dialect`, `adapter`, `api_key_env`), the same move LiteLLM's
   own long tail made (`openai_like/providers.json`). The provider catalog
@@ -64,6 +69,12 @@ bun test                     # adapter, ladder and citizenship suites
 `upstreams.yaml` documents the row format inline. Override at runtime with
 `BUCKLE_UPSTREAMS=/path/to/extra.yaml` (merged by group name; never
 committed).
+
+Egress law (startup-fatal, `src/adapters/egress.ts`): upstream `url`s are
+https, or plain http to a loopback literal; other plain-http hosts must be
+listed in `BUCKLE_HTTP_UPSTREAM_HOSTS`. Azure/Vertex `token_host` must be
+https and on the family allowlist (extend with `BUCKLE_TOKEN_HOSTS`);
+loopback token mocks need `BUCKLE_TOKEN_HOST_LOOPBACK=on`.
 
 ## Design sources
 

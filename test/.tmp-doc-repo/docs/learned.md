@@ -1,0 +1,1 @@
+the post-files gate runs qlty-fmt plus fast lint on every write
