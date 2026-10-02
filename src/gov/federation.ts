@@ -1,8 +1,12 @@
 // src/gov/federation.ts — W154 federation phase 1: hub policy distribution +
-// spoke pull. GETs are anonymous spoke-pull reads in phase 1 (the manifest
-// gets hub signatures in W156, so authenticity never rests on transport
-// auth); presented credentials are always validated; POST requires
-// buckle:spoke:WRITE_. Visibility law: spoke-private models never appear —
+// spoke pull. W193: NO anonymous pulls — every federation request
+// authenticates (GETs demand buckle:spoke:READ_); presented credentials are
+// always validated (invalid bearer = 401, never downgraded); POST requires
+// buckle:spoke:WRITE_. The manifest is SIGNED (W193): the hub's RS256
+// identity signs the exact response bytes (detached JWS in
+// x-buckle-manifest-signature); spokes verify via /.well-known/jwks.json —
+// authenticity never rests on transport auth. Visibility law: spoke-private
+// models never appear —
 // structural (hub cannot see them) + defensive `visibility: spoke-private`.
 import { Database } from "bun:sqlite";
 import { YAML } from "bun";
@@ -22,6 +26,7 @@ import {
 import { applyGovernanceSchema } from "./schema.ts";
 import { authError, type Principal } from "./middleware.ts";
 import { hasScope } from "./scopes.ts";
+import type { ManifestSigner } from "./federation-signing.ts";
 
 export interface FederationOpts {
 	dbPath: string;
@@ -30,6 +35,9 @@ export interface FederationOpts {
 	/** W160: the routing-policy.yaml path — the verification probe re-reads
 	 *  this surface from disk before a CR may report `verified`. */
 	policyPath?: string;
+	/** W193: RS256 manifest-signing identity — JWKS serve + detached-JWS
+	 *  signature over the exact manifest bytes (null = serve unsigned). */
+	signer?: ManifestSigner;
 }
 
 export interface CrRow {
@@ -45,6 +53,10 @@ export interface CrRow {
 	payload: string | null;
 	origin: string | null;
 	verified_at: number | null;
+	/** W193 claim binding: the first spoke report binds claimed_by (other
+	 *  non-admin principals 403 buckle.cr_claimed; hub-admin moves anything). */
+	claimed_by: string | null;
+	claimed_at: number | null;
 }
 
 /** The principal a gate-authenticated request carries (WeakMap stash — no
@@ -106,6 +118,8 @@ export class Federation {
 	readonly db: Database;
 	private readonly policy: GatewayPolicy;
 	private readonly pool: UpstreamPool;
+	/** W193: the hub signing identity (JWKS + manifest signatures). */
+	readonly signer: ManifestSigner | null;
 	/** W160 verification probes, by target prefix (longest match wins). */
 	private readonly probes = new Map<string, CrProbe>();
 
@@ -115,6 +129,7 @@ export class Federation {
 		applyGovernanceSchema(this.db);
 		this.policy = opts.policy;
 		this.pool = opts.pool;
+		this.signer = opts.signer ?? null;
 		const rev = policyRevisionProbe(opts.policyPath);
 		this.registerProbe("policy@", rev);
 		this.registerProbe("routing-policy@", rev);
@@ -177,13 +192,28 @@ export class Federation {
 		return { rpm: r.rpm_ceiling, tpm: r.tpm_ceiling };
 	}
 
+	/** W193: the manifest response — the hub signs the EXACT response bytes
+	 *  (detached JWS in x-buckle-manifest-signature). Unsigned only when no
+	 *  signing identity is wired (spokes degrade honestly). */
+	private manifestResponse(): Response {
+		const body = JSON.stringify(this.manifest());
+		const headers: Record<string, string> = {
+			"content-type": "application/json; charset=utf-8",
+		};
+		if (this.signer !== null)
+			headers["x-buckle-manifest-signature"] = this.signer.sign(
+				new TextEncoder().encode(body),
+			);
+		return new Response(body, { headers });
+	}
+
 	/** Route dispatch. CR delivery confirmation POST carries the spoke's
 	 *  principal (gate enforces buckle:spoke:WRITE_; auth-off dev refuses
 	 *  honestly when no principal ever got stashed). */
 	async handle(req: Request, p: Principal | null): Promise<Response> {
 		const url = new URL(req.url);
 		if (req.method === "GET" && url.pathname === "/federation/policy-manifest")
-			return Response.json(this.manifest());
+			return this.manifestResponse();
 		if (req.method === "GET" && url.pathname === "/federation/entitlements")
 			return Response.json(this.entitlements(p));
 		if (req.method === "POST" && url.pathname === "/federation/cr")
@@ -213,8 +243,16 @@ export class Federation {
 		if (body === null) return bad(400, "buckle.bad_body", "invalid JSON body");
 		const state = typeof body.state === "string" ? body.state : "";
 		const note = typeof body.note === "string" ? body.note : null;
-		const out = transitionCR(this.db, id, state, note, (cr) =>
-			this.runProbe(cr),
+		const out = transitionCR(
+			this.db,
+			id,
+			state,
+			note,
+			(cr) => this.runProbe(cr),
+			{
+				id: p.keyId,
+				admin: p.kind === "root" || hasScope(p.scopes, "buckle:admin:WRITE_"),
+			},
 		);
 		if (!out.ok) return bad(out.status, out.code, out.why);
 		return Response.json({
@@ -325,6 +363,8 @@ export class Federation {
 			updated_at: r.updated_at,
 			reported_at: r.reported_at,
 			verified_at: r.verified_at,
+			claimed_by: r.claimed_by,
+			claimed_at: r.claimed_at,
 		};
 	}
 

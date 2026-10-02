@@ -2,6 +2,7 @@
 // spoke-pull GETs (manifest + entitlements), credential validation (presented
 // creds never downgraded), spoke-class scopes, team ceilings, CR lifecycle
 // transitions enforced server-side, visibility-law exclusion.
+// W193: pulls are authenticated (spoke:READ_) and the manifest is signed.
 import { describe, expect, test } from "bun:test";
 import { declareCR } from "../src/gov/federation-manifest.ts";
 import { startServer } from "../src/server.ts";
@@ -75,7 +76,13 @@ async function issueKey(
 describe("federation: policy manifest (anonymous spoke-pull)", () => {
 	test("GET /federation/policy-manifest → 200 {version, rules[], cr_queue[]}", async () => {
 		const fed = await startFed();
-		const res = await fetch(`${fed.base}/federation/policy-manifest`);
+		const spokeKey = await issueKey(fed.base, {
+			name: "spoke-pull",
+			scopes: ["buckle:spoke:READ_"],
+		});
+		const res = await fetch(`${fed.base}/federation/policy-manifest`, {
+			headers: { authorization: `Bearer ${spokeKey}` },
+		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as {
 			version: string;
@@ -96,7 +103,13 @@ describe("federation: policy manifest (anonymous spoke-pull)", () => {
 describe("federation: entitlements (echo menu, visibility law)", () => {
 	test("hub models only — spoke-private excluded, dormant = cloud", async () => {
 		const fed = await startFed();
-		const res = await fetch(`${fed.base}/federation/entitlements`);
+		const spokeKey = await issueKey(fed.base, {
+			name: "spoke-menu",
+			scopes: ["buckle:spoke:READ_"],
+		});
+		const res = await fetch(`${fed.base}/federation/entitlements`, {
+			headers: { authorization: `Bearer ${spokeKey}` },
+		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as {
 			models: Array<{
@@ -197,7 +210,13 @@ describe("federation: CR lifecycle (server-side transitions)", () => {
 			target: "routing-policy@1",
 			origin: { system: "belt", actor: "w154-test" },
 		});
-		const res = await fetch(`${fed.base}/federation/policy-manifest`);
+		const spokeKey = await issueKey(fed.base, {
+			name: "spoke-cr",
+			scopes: ["buckle:spoke:READ_"],
+		});
+		const res = await fetch(`${fed.base}/federation/policy-manifest`, {
+			headers: { authorization: `Bearer ${spokeKey}` },
+		});
 		const body = (await res.json()) as { cr_queue: CrEntry[] };
 		expect(body.cr_queue).toHaveLength(1);
 		expect(body.cr_queue[0]?.id).toBe("cr-1");

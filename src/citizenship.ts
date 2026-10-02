@@ -76,6 +76,7 @@ export function problem(p: ProblemInput): Response {
 export function allowOf(path: string): string | null {
 	if (path === "/health" || path === "/v1/models") return "GET, HEAD, OPTIONS";
 	if (path === "/status" || path === "/metrics") return "GET, HEAD, OPTIONS";
+	if (path === "/.well-known/jwks.json") return "GET, HEAD, OPTIONS";
 	if (
 		path === "/v1/chat/completions" ||
 		path === "/v1/messages" ||

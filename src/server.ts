@@ -15,6 +15,9 @@ import { Ledger } from "./ledger.ts";
 import { poolWarm, prewarm } from "./pool-warm.ts";
 import { createGovernance, type GovernanceOpts } from "./gov/middleware.ts";
 import { Federation } from "./gov/federation.ts";
+import { ManifestSigner } from "./gov/federation-signing.ts";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { loadGatewayPolicy, loadPrefs } from "./policy.ts";
 import { Router, type RouterMetrics } from "./router.ts";
 import { servicemon } from "./servicemon.ts";
@@ -36,6 +39,9 @@ export interface ServerOpts {
 	policyPath?: string;
 	upstreamsPath?: string;
 	prefsPath?: string;
+	/** W193: secrets home for the manifest-signing key (hub-only key law).
+	 *  Defaults: BUCKLE_SECRETS_HOME env, else ~/.claude/local-llm. */
+	secretsHome?: string;
 	// W141 governance: root break-glass key + optional JWT validator config.
 	auth?: Pick<GovernanceOpts, "rootKey" | "jwt">;
 }
@@ -142,6 +148,11 @@ export function buildDeps(
 		policy,
 		pool,
 		policyPath: opts.policyPath,
+		signer: ManifestSigner.create(
+			opts.secretsHome ??
+				process.env.BUCKLE_SECRETS_HOME ??
+				join(process.env.HOME ?? homedir(), ".claude", "local-llm"),
+		),
 	});
 	return {
 		router,

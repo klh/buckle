@@ -3,6 +3,8 @@
 // (generic {id, kind, target, ...} envelope — W164 repo-scoped laws ride the
 // same shape); version is content-addressed (same rules → same string) so a
 // spoke detects policy change by comparing one field.
+// W193: CR rows carry claim binding — the first spoke report from `declared`
+// binds the CR to that principal; other non-admin principals cannot move it.
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import type { GatewayPolicy } from "../policy.ts";
@@ -194,6 +196,14 @@ function crLive(state: string): boolean {
  *  landed — spoke claims are never trusted alone. */
 export type CrProbe = (cr: CrRow) => { ok: boolean; why: string | null };
 
+/** W193 claim identity: the reporting principal's stable id plus whether it
+ *  holds hub-admin capability (admins/root may move any CR; spokes only
+ *  their own claims). */
+export interface CrActor {
+	id: string;
+	admin: boolean;
+}
+
 /** Spoke-reported CR state transition, enforced server-side: only the
  *  lifecycle's next state (or failed-from-live) is accepted; 409-mapped
  *  rejection otherwise. applied→verified additionally requires the hub's
@@ -204,6 +214,7 @@ export function transitionCR(
 	to: string,
 	note: string | null,
 	probe?: CrProbe,
+	actor?: CrActor,
 ):
 	| { ok: true; row: CrRow }
 	| { ok: false; status: number; code: string; why: string } {
@@ -244,15 +255,30 @@ export function transitionCR(
 				why: `CR ${id}: verification probe failed — ${v.why ?? "target not confirmed"}`,
 			};
 	}
+	const claimant = actor ?? null;
+	if (
+		current.claimed_by !== null &&
+		claimant !== null &&
+		claimant.admin === false &&
+		claimant.id !== current.claimed_by
+	)
+		return {
+			ok: false,
+			status: 403,
+			code: "buckle.cr_claimed",
+			why: `CR ${id} is claimed by '${current.claimed_by}'; reports only from the claimant (or hub-admin)`,
+		};
 	const ts = Date.now();
 	db.query(
-		"UPDATE federation_cr_queue SET state = ?, note = ?, updated_at = ?, reported_at = ?, verified_at = ? WHERE id = ?",
+		"UPDATE federation_cr_queue SET state = ?, note = ?, updated_at = ?, reported_at = ?, verified_at = ?, claimed_by = COALESCE(claimed_by, ?), claimed_at = COALESCE(claimed_at, ?) WHERE id = ?",
 	).run(
 		to,
 		note,
 		ts,
 		to === "reported-up" ? ts : current.reported_at,
 		to === "verified" ? ts : current.verified_at,
+		claimant?.id ?? null,
+		claimant === null ? null : ts,
 		id,
 	);
 	return {

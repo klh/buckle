@@ -94,10 +94,13 @@ interface CrRowView {
 	payload: unknown;
 	origin: { system?: string; actor?: string } | null;
 	verified_at: number | null;
+	claimed_by: string | null;
 }
 
-async function manifestCRs(base: string): Promise<CrRowView[]> {
-	const res = await fetch(`${base}/federation/policy-manifest`);
+async function manifestCRs(base: string, key: string): Promise<CrRowView[]> {
+	const res = await fetch(`${base}/federation/policy-manifest`, {
+		headers: { authorization: `Bearer ${key}` },
+	});
 	const body = (await res.json()) as { cr_queue: CrRowView[] };
 	return body.cr_queue;
 }
@@ -128,7 +131,9 @@ describe("w160: full lifecycle", () => {
 		const v = await post("verified");
 		expect(v.status).toBe(200);
 		expect((await post("reported-up")).status).toBe(200);
-		const row = (await manifestCRs(fed.base)).find((c) => c.id === "cr-life");
+		const row = (await manifestCRs(fed.base, ROOT)).find(
+			(c) => c.id === "cr-life",
+		);
 		expect(row?.state).toBe("reported-up");
 		expect(row?.verified_at).not.toBeNull();
 		fed.stop();
@@ -158,7 +163,7 @@ describe("w160: full lifecycle", () => {
 		expect(v.status).toBe(409);
 		const why = (await v.json()) as { error: { code: string } };
 		expect(why.error.code).toBe("buckle.cr_probe");
-		const row = (await manifestCRs(fed.base)).find(
+		const row = (await manifestCRs(fed.base, ROOT)).find(
 			(c) => c.id === "cr-probe-fail",
 		);
 		expect(row?.state).toBe("applied");
@@ -221,7 +226,7 @@ describe("w160: domain separation — hub-admin only, private content never ente
 			origin: { system: "belt", actor: "kkh", data_domain: "private" },
 		});
 		expect(viaOrigin.status).toBe(422);
-		const crs = await manifestCRs(fed.base);
+		const crs = await manifestCRs(fed.base, ROOT);
 		expect(crs.length).toBe(0);
 		fed.stop();
 	});
@@ -274,6 +279,84 @@ describe("w160: seam — declareCR guard + lifecycle edges", () => {
 		expect(fail.ok && fail.row.note).toContain("reconcile");
 		const term = transitionCR(db, "s10", "reported-up", null);
 		expect(term.ok).toBe(false);
+		srv.stop(true);
+	});
+});
+
+describe("w193: CR claim binding (buckle.cr_claimed)", () => {
+	test("first spoke report claims; different spoke 403; admin bypass", async () => {
+		const fed = await startFed();
+		await declareReq(fed.base, ROOT, {
+			id: "cr-claim",
+			action: "adopt-policy",
+			target: "policy@1",
+			origin: { system: "belt", actor: "kkh" },
+		});
+		const keyIdOf = (raw: string): string =>
+			new Bun.CryptoHasher("sha256").update(raw).digest("hex").slice(0, 12);
+		const ka = await issueKey(fed.base, {
+			name: "spoke-a",
+			scopes: ["buckle:spoke:WRITE_"],
+		});
+		const kb = await issueKey(fed.base, {
+			name: "spoke-b",
+			scopes: ["buckle:spoke:WRITE_"],
+		});
+		const post = (key: string, state: string) =>
+			fetch(`${fed.base}/federation/cr/cr-claim/status`, {
+				method: "POST",
+				headers: { authorization: `Bearer ${key}` },
+				body: JSON.stringify({ state }),
+			});
+		const d = await post(ka, "delivered");
+		expect(d.status).toBe(200);
+		const row = (await manifestCRs(fed.base, ROOT)).find(
+			(c) => c.id === "cr-claim",
+		);
+		expect(row?.state).toBe("delivered");
+		expect(row?.claimed_by).toBe(keyIdOf(ka));
+		const other = await post(kb, "applied");
+		expect(other.status).toBe(403);
+		const why = (await other.json()) as { error: { code: string } };
+		expect(why.error.code).toBe("buckle.cr_claimed");
+		const admin = await post(ROOT, "applied");
+		expect(admin.status).toBe(200);
+		expect(row?.claimed_by).toBe(keyIdOf(ka));
+		fed.stop();
+	});
+
+	test("seam: transitionCR claim semantics (bind, refuse, admin)", () => {
+		const srv = startServer({
+			port: 0,
+			policyPath: "/tmp/w193-seam.policy.yaml",
+			dbPath: ":memory:",
+		});
+		const db = srv.gov.federation?.db;
+		if (db === undefined) throw new Error("federation missing");
+		const made = declareCR(db, {
+			id: "s193",
+			action: "adopt-policy",
+			target: "work-graph@2",
+			origin: { system: "suspenders", actor: "w193" },
+		});
+		if (!made.ok) throw new Error("declare failed");
+		const first = transitionCR(db, "s193", "delivered", null, undefined, {
+			id: "spoke-1",
+			admin: false,
+		});
+		expect(first.ok).toBe(true);
+		if (first.ok) expect(first.row.claimed_by).toBe("spoke-1");
+		const other = transitionCR(db, "s193", "applied", null, undefined, {
+			id: "spoke-2",
+			admin: false,
+		});
+		expect(other.ok).toBe(false);
+		if (!other.ok) expect(other.code).toBe("buckle.cr_claimed");
+		const adm = transitionCR(db, "s193", "applied", null, undefined, {
+			id: "hub-admin",
+			admin: true,
+		});
+		expect(adm.ok).toBe(true);
 		srv.stop(true);
 	});
 });

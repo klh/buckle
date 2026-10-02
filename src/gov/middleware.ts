@@ -256,9 +256,10 @@ export class Governance {
 		};
 	}
 
-	/** Federation semantics (W154): anonymous GET = phase-1 spoke-pull (W156
-	 *  signatures bring authenticity); presented creds always validated
-	 *  (invalid bearer = 401, never downgraded); POST needs spoke:WRITE_. */
+	/** Federation semantics (W193): NO anonymous GETs — spoke authz at the
+	 *  gate (GETs demand buckle:spoke:READ_); presented creds always
+	 *  validated (invalid bearer = 401, never downgraded); POST needs
+	 *  spoke:WRITE_; /federation/cr exact stays hub-admin. */
 	private async federationGate(
 		req: Request,
 		path: string,
@@ -266,12 +267,10 @@ export class Governance {
 	): Promise<Response> {
 		if (this.federation === null) return inner(req);
 		const m = /^Bearer\s+(.+)$/i.exec(req.headers.get("authorization") ?? "");
-		if (m === null) {
-			if (req.method === "GET") return inner(req);
+		if (m === null)
 			return authError(401, "buckle.auth_missing", "missing bearer token", {
 				instance: path,
 			});
-		}
 		const auth = await this.authenticate(req);
 		if (!auth.ok) {
 			this.rejectEvent(req, auth.code);
@@ -512,6 +511,7 @@ export function classify(
 ): "public" | "admin" | "proxy" | "federation" {
 	if (path === "/health" || path === "/status" || path === "/metrics")
 		return "public";
+	if (path === "/.well-known/jwks.json") return "public"; // W193 JWKS: spokes fetch pre-cred
 	if (path === "/federation" || path.startsWith("/federation/"))
 		return "federation";
 	if (path.startsWith("/v1/admin")) return "admin";

@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS federation_cr_queue (
   reported_at INTEGER,
   payload TEXT,
   origin TEXT,
-  verified_at INTEGER
+  verified_at INTEGER,
+  claimed_by TEXT,
+  claimed_at INTEGER
 );
 `;
 
@@ -165,6 +167,10 @@ export function applyGovernanceSchema(db: Database): void {
 		db.run("ALTER TABLE federation_cr_queue ADD COLUMN origin TEXT");
 	if (!crCols.includes("verified_at"))
 		db.run("ALTER TABLE federation_cr_queue ADD COLUMN verified_at INTEGER");
+	if (!crCols.includes("claimed_by"))
+		db.run("ALTER TABLE federation_cr_queue ADD COLUMN claimed_by TEXT");
+	if (!crCols.includes("claimed_at"))
+		db.run("ALTER TABLE federation_cr_queue ADD COLUMN claimed_at INTEGER");
 	// the deltas mirror — guarded CREATEs, self-healing on every open
 	for (const { tbl, pk, cols } of DELTA_TABLES)
 		for (const op of ["insert", "update", "delete"] as const)

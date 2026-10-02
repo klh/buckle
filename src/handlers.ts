@@ -545,6 +545,18 @@ export function createApp(deps: AppDeps): App {
 		if (method === "GET" && path === "/health") {
 			return new Response("ok", { headers: { "content-type": "text/plain" } });
 		}
+
+		if (method === "GET" && path === "/.well-known/jwks.json") {
+			// W193: public JWKS — spokes fetch the manifest-signing public key
+			// pre-cred; bare deps 404 honestly (the AppDeps contract).
+			if (!deps.federation?.signer)
+				return problem({
+					status: 404,
+					code: "buckle.no_route",
+					why: `no route: ${method} ${path}`,
+				});
+			return Response.json(deps.federation.signer.jwks());
+		}
 		if (path.startsWith("/federation")) {
 			// bare deps 404 honestly (the AppDeps contract)
 			if (!deps.federation)
