@@ -49,3 +49,14 @@ aids:
   compress:
     default: off
     max_prose_bytes: 1536
+  # W4 intent expansion (the W288 retarget): orchestrate-enhance declares
+  # `expand` and the user goal is expanded with an architectural-wants
+  # digest (fleet laws + repo conventions) by the LOCAL DIRECT tier — one
+  # candidate, no ladder walk, never a cloud row. DEFAULT-OFF until an
+  # operator flips it (an extra LLM hop must prove ROI first).
+  expand:
+    default: off
+    group: local-swarm
+    timeout_ms: 3000
+    max_goal_chars: 4000
+    max_digest_bytes: 2048

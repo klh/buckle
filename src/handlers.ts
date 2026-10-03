@@ -10,6 +10,7 @@
 import type { AidsLedger } from "./aids.ts";
 import { aidsRoutes, applyWireAids } from "./aids-routes.ts";
 import type { CandidateRow, CandidateTable } from "./candidates.ts";
+import type { Expander } from "./expand.ts";
 import {
 	allowOf,
 	methodNotAllowed,
@@ -54,6 +55,9 @@ export interface AppDeps {
 	aids: AidsLedger;
 	preseeder: Preseeder;
 	aidsPolicy: AidsPolicy;
+	// W4 intent expansion — optional so bare deps (testDeps, dev) skip the
+	// expand aid honestly instead of failing the wire path.
+	expander?: Expander;
 	// W154 federation surface — present on hub-shaped deps (buildDeps);
 	// optional so bare deps (testDeps, dev) 404 honestly.
 	federation?: Federation;
@@ -236,7 +240,7 @@ async function proxy(
 	const model = typeof body.model === "string" ? body.model : "";
 	if (model.length === 0)
 		return deny(deps, ctx, 400, "missing model", null, "denied");
-	const wire = applyWireAids(
+	const wire = await applyWireAids(
 		deps,
 		req.headers.get("x-belt-aids"),
 		body,

@@ -49,13 +49,18 @@ describe("PoolWarm", () => {
 			groups: () => ["g"],
 			deployments: () => [{ group: "g", url: up.url, dialect: "openai" }],
 		};
-		// prewarm marks the module singleton warm without counting refills
+		// prewarm marks the module singleton warm without counting refills.
+		// The singleton is process-wide (wire.ts observes through it), so
+		// sibling files dispatching concurrently can bump refills mid-test —
+		// assert the DELTA over this test's window, not an absolute zero.
+		poolWarm.reset();
+		const refillsBefore = poolWarm.stats().refills;
 		const res = await prewarm(pool);
 		expect(res.warm).toBe(1);
 		expect(res.total).toBe(1);
 		expect(res.failed).toEqual([]);
 		expect(poolWarm.isWarm(up.url)).toBe(true);
-		expect(poolWarm.stats().refills).toBe(0);
+		expect(poolWarm.stats().refills).toBe(refillsBefore);
 		up.close();
 	});
 });

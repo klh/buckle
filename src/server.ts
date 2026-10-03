@@ -10,6 +10,7 @@ import { AidsLedger } from "./aids.ts";
 import { CandidateTable } from "./candidates.ts";
 import { Cooldowns } from "./cooldown.ts";
 import { decideRoute } from "./decide.ts";
+import { Expander, directCall, pickLocalDirect } from "./expand.ts";
 import { Federation } from "./gov/federation.ts";
 import { ManifestSigner } from "./gov/federation-signing.ts";
 import { createGovernance, type GovernanceOpts } from "./gov/middleware.ts";
@@ -104,6 +105,14 @@ export function buildDeps(
 	);
 	const table = new CandidateTable({ pool, policy, cooldowns });
 	table.start();
+	// W4 intent expansion: the local direct tier (aids.expand.group, default
+	// local-swarm) serves the enhance digest — structurally local (never a
+	// cloud row), one direct call, never the ladder (the W288 retarget).
+	const expander = new Expander({
+		policy: aidsPolicy,
+		pick: (group) => pickLocalDirect(table.snapshot(), group),
+		call: directCall,
+	});
 	const metrics: RouterMetrics = {
 		fallback: (tier) =>
 			sm
@@ -171,6 +180,7 @@ export function buildDeps(
 		aids,
 		preseeder,
 		aidsPolicy,
+		expander,
 		sm,
 		pool,
 		decide,

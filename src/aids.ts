@@ -7,13 +7,14 @@
 // fabricated per-request. An aid that cannot log does not fire.
 import { Database } from "bun:sqlite";
 
-/** The four declared keys; unknown keys are ignored (forward-compatible). */
-export type AidKey = "preseed" | "cache-align" | "compress" | "off";
+/** The five declared keys; unknown keys are ignored (forward-compatible). */
+export type AidKey = "preseed" | "cache-align" | "compress" | "expand" | "off";
 
 export interface AidsStanza {
 	preseed?: { domain: string; focus: string[] };
 	"cache-align"?: boolean;
 	compress?: boolean;
+	expand?: boolean;
 	off: boolean;
 	unknown: string[];
 }
@@ -56,6 +57,9 @@ export function parseAids(raw: string | null | undefined): AidsStanza {
 			case "compress":
 				out.compress = true;
 				break;
+			case "expand":
+				out.expand = true;
+				break;
 			default:
 				out.unknown.push(p);
 		}
@@ -75,6 +79,9 @@ export interface AidEventInput {
 	sid?: string | null;
 	work_item?: string | null;
 	packet_id?: string | null;
+	/** W4 expand: the REAL serving model (the deployment that produced the
+	 *  digest), never the group alias. Absent for caller-served aids. */
+	served_model?: string;
 	tokens_injected?: number;
 	est_tok_saved?: number | null;
 	rows?: {
@@ -110,6 +117,7 @@ CREATE TABLE IF NOT EXISTS aid_events (
   sid TEXT,
   work_item TEXT,
   packet_id TEXT,
+  served_model TEXT,
   tokens_injected INTEGER NOT NULL DEFAULT 0,
   est_tok_saved INTEGER,
   rows_total INTEGER NOT NULL DEFAULT 0,
@@ -162,6 +170,13 @@ export class AidsLedger {
 		this.db = new Database(path, { create: true });
 		this.db.exec("PRAGMA journal_mode = WAL");
 		this.db.exec(SCHEMA);
+		// Pre-W4 databases lack the expand ledger's served_model column;
+		// CREATE TABLE IF NOT EXISTS never amends an existing table.
+		try {
+			this.db.exec("ALTER TABLE aid_events ADD COLUMN served_model TEXT");
+		} catch {
+			// column already present (fresh schema or migrated)
+		}
 	}
 
 	/** Record one decision. Duplicate event_id → null (idempotent). */
@@ -170,7 +185,7 @@ export class AidsLedger {
 		const fp = ev.repo_root ? repoFp(ev.repo_root) : "";
 		const event_id = new Bun.CryptoHasher("sha256")
 			.update(
-				`${ts}|${ev.aid}|${ev.decision}|${ev.skip_reason ?? ""}|${fp}|${ev.sid ?? ""}|${ev.work_item ?? ""}|${ev.packet_id ?? ""}|${ev.tokens_injected ?? 0}`,
+				`${ts}|${ev.aid}|${ev.decision}|${ev.skip_reason ?? ""}|${fp}|${ev.sid ?? ""}|${ev.work_item ?? ""}|${ev.packet_id ?? ""}|${ev.served_model ?? ""}|${ev.tokens_injected ?? 0}`,
 			)
 			.digest("hex")
 			.slice(0, 16);
@@ -179,9 +194,9 @@ export class AidsLedger {
 				.query(
 					`INSERT INTO aid_events (
              event_id, ts, aid, decision, skip_reason, domain, repo_fp,
-             sid, work_item, packet_id, tokens_injected, est_tok_saved,
+             sid, work_item, packet_id, served_model, tokens_injected, est_tok_saved,
              rows_total, rows_verified, rows_doc_covered, rows_unverified, basis
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				)
 				.run(
 					event_id,
@@ -194,6 +209,7 @@ export class AidsLedger {
 					ev.sid ?? null,
 					ev.work_item ?? null,
 					ev.packet_id ?? null,
+					ev.served_model ?? null,
 					ev.tokens_injected ?? 0,
 					ev.est_tok_saved ?? null, // NULL at event time — the law
 					ev.rows?.total ?? 0,
@@ -212,25 +228,29 @@ export class AidsLedger {
 	}
 
 	/** Aggregate events into complete hour buckets (last `hours`).
-	 *  model_group is the constant "all": aids fire at dispatch, pre-routing,
-	 *  and token outcomes join by (sid → actor, hour) — never model. */
+	 *  model_group is "all" except expand (W4), whose events carry the REAL
+	 *  serving model — a rollup never claims a model the aid didn't serve.
+	 *  Caller-served aids fire at dispatch, pre-routing; token outcomes join
+	 *  by (sid → actor, hour) — never model. */
 	rollup(hours = 24, nowMs?: number): number {
 		const to = Math.floor((nowMs ?? this.now().getTime()) / 3_600_000);
 		const from = to - hours + 1;
 		const rows = this.db
 			.query(
 				`SELECT (ts / 3600000) * 3600000 AS bucket, aid, domain,
+                COALESCE(served_model, 'all') AS model_group,
                 SUM(decision = 'injected') AS injected,
                 SUM(decision = 'skipped') AS skipped,
                 SUM(tokens_injected) AS tok_injected,
                 COUNT(*) AS requests
          FROM aid_events WHERE ts >= ? AND ts < ?
-         GROUP BY bucket, aid, domain`,
+         GROUP BY bucket, aid, domain, model_group`,
 			)
 			.all(from * 3_600_000, (to + 1) * 3_600_000) as Array<{
 			bucket: number;
 			aid: string;
 			domain: string;
+			model_group: string;
 			injected: number;
 			skipped: number;
 			tok_injected: number;
@@ -243,7 +263,7 @@ export class AidsLedger {
 					r.bucket,
 					r.aid,
 					r.domain,
-					"all",
+					r.model_group,
 					r.injected ?? 0,
 					r.skipped ?? 0,
 					r.tok_injected ?? 0,

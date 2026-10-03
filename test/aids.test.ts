@@ -257,13 +257,13 @@ describe("cache-align", () => {
 });
 
 describe("wire aids", () => {
-	test("no header → zero touch; compress wired default-off → skip(policy)", () => {
+	test("no header → zero touch; compress wired default-off → skip(policy)", async () => {
 		const deps = mkDeps({ compress: { default: "off" } });
 		const body = { model: "m", system: "s", messages: [] };
-		const untouched = applyWireAids(deps, null, body, "anthropic");
+		const untouched = await applyWireAids(deps, null, body, "anthropic");
 		expect(untouched.body).toBe(body);
 		expect(untouched.aligned).toBe(false);
-		const comp = applyWireAids(
+		const comp = await applyWireAids(
 			deps,
 			"compress",
 			{ model: "m", messages: [] },
@@ -276,10 +276,10 @@ describe("wire aids", () => {
 		expect(row.skip_reason).toBe("policy");
 	});
 
-	test("declared cache-align aligns and meters one injected event", () => {
+	test("declared cache-align aligns and meters one injected event", async () => {
 		const deps = mkDeps({ "cache-align": { default: "on" } });
 		const body = { model: "m", system: "preamble", messages: [] };
-		const out = applyWireAids(deps, "cache-align", body, "anthropic");
+		const out = await applyWireAids(deps, "cache-align", body, "anthropic");
 		expect(out.aligned).toBe(true);
 		const row = deps.aids.eventsSince(0)[0] as Record<string, unknown>;
 		expect(row.aid).toBe("cache-align");

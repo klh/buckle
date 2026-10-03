@@ -8,6 +8,7 @@
 // request; cache-align runs ONLY when declared (pass-through doctrine).
 import { parseAids, tokensEstimate, type AidsLedger } from "./aids.ts";
 import { alignBody } from "./align.ts";
+import type { Expander } from "./expand.ts";
 import type { Preseeder } from "./preseed.ts";
 import type { AidsPolicy } from "./policy.ts";
 import type { Servicemon } from "./servicemon.ts";
@@ -18,6 +19,9 @@ export interface AidsDeps {
 	preseeder: Preseeder;
 	aidsPolicy: AidsPolicy;
 	sm: Servicemon;
+	/** W4 intent expansion — optional so bare aids deps (tests, dev) skip
+	 *  honestly (garnish law) instead of failing the route. */
+	expander?: Expander;
 }
 
 type AnyRec = Record<string, unknown>;
@@ -35,6 +39,7 @@ function meter(
 		sid?: string | null;
 		work_item?: string | null;
 		packet_id?: string | null;
+		served_model?: string;
 		tokens_injected?: number;
 	},
 ): void {
@@ -120,6 +125,51 @@ export async function aidsPreseed(
 	return Response.json({ ok: true, ...out });
 }
 
+/** POST /aids/expand — belt's orchestrate-enhance calls this with a goal
+ *  (+ optional single-string context) and gets the architectural-wants
+ *  digest back, served by the local direct tier (the W288 retarget). */
+export async function aidsExpand(
+	deps: AidsDeps,
+	req: Request,
+): Promise<Response> {
+	const expander = deps.expander;
+	if (!expander)
+		return Response.json(
+			{ ok: false, error: "expander not configured" },
+			{ status: 501 },
+		);
+	let raw: AnyRec;
+	try {
+		raw = (await req.json()) as AnyRec;
+	} catch {
+		return Response.json(
+			{ ok: false, error: "invalid JSON body" },
+			{ status: 400 },
+		);
+	}
+	const goal = typeof raw.goal === "string" ? raw.goal : "";
+	if (!goal.trim())
+		return Response.json(
+			{ ok: false, error: "goal is required" },
+			{ status: 400 },
+		);
+
+	const outcome = await expander.expand({
+		goal,
+		context: typeof raw.context === "string" ? raw.context : undefined,
+		sid: typeof raw.sid === "string" ? raw.sid : null,
+		work_item: typeof raw.work_item === "string" ? raw.work_item : null,
+	});
+	meter(deps, {
+		aid: "expand",
+		decision: outcome.decision,
+		skip_reason: outcome.skip_reason ?? null,
+		served_model: outcome.served_model,
+		tokens_injected: outcome.bytes ? tokensEstimate(outcome.bytes) : 0,
+	});
+	return Response.json({ ok: true, ...outcome });
+}
+
 /** GET /aids/status — meter totals (the honest immediate metrics: tokens
  *  injected + decision counts; est saved is A/B-derived at dashboard time). */
 export function aidsStatus(deps: AidsDeps): Response {
@@ -144,14 +194,16 @@ export function aidsRollup(deps: AidsDeps, hours: number): Response {
 	return Response.json({ ok: true, rows: deps.aids.rollupRows(h) });
 }
 
-/** Wire-path aids: called on every proxied request. No x-belt-aids header →
- *  zero touch (pass-through doctrine). Returns the (possibly aligned) body. */
-export function applyWireAids(
+/** Wire-path aids: called on every proxied request (await it). No
+ *  x-belt-aids header → zero touch (pass-through doctrine). The expand
+ *  branch (W4) runs the intent expansion pre-routing when declared AND the
+ *  policy gate is open — the expanded body is what rides OUT. */
+export async function applyWireAids(
 	deps: AidsDeps,
 	header: string | null,
 	body: AnyRec,
 	dialect: Dialect,
-): { body: AnyRec; aligned: boolean } {
+): Promise<{ body: AnyRec; aligned: boolean }> {
 	const stanza = parseAids(header);
 	if (stanza.unknown.length > 0) {
 		for (const u of stanza.unknown)
@@ -162,6 +214,20 @@ export function applyWireAids(
 			});
 	}
 	if (stanza.off) return { body, aligned: false };
+	if (stanza.expand) {
+		// W4 intent expansion: the local direct tier expands the goal before
+		// routing; a missing expander is an honest policy skip (garnish law).
+		const outcome = deps.expander
+			? await deps.expander.expandBody(body, dialect)
+			: { decision: "skipped" as const, skip_reason: "policy" as const };
+		meter(deps, {
+			aid: "expand",
+			decision: outcome.decision,
+			skip_reason: outcome.skip_reason ?? null,
+			served_model: outcome.served_model,
+			tokens_injected: outcome.bytes ? tokensEstimate(outcome.bytes) : 0,
+		});
+	}
 	if (stanza.compress) {
 		// wired, DEFAULT-OFF (W137 economics): policy forbids → skip, metered
 		const on = deps.aidsPolicy.compress?.default === "on";
@@ -194,6 +260,11 @@ export async function aidsRoutes(
 	const url = new URL(req.url);
 	if (req.method === "POST" && path === "/aids/preseed")
 		return aidsPreseed(deps, req);
+	if (req.method === "POST" && path === "/aids/expand") {
+		// bare deps (no expander) 404 honestly — the AppDeps contract
+		if (!deps.expander) return null;
+		return aidsExpand(deps, req);
+	}
 	if (req.method === "GET" && path === "/aids/status") return aidsStatus(deps);
 	if (req.method === "GET" && path === "/aids/rollup")
 		return aidsRollup(deps, Number(url.searchParams.get("hours") ?? "24"));

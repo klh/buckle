@@ -41,3 +41,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # W144 shadow week: runtime bench samples + the bounded daily log
 /shadow/
+
+# aids test fixtures (written into import.meta.dir by test/aids.test.ts)
+/test/.tmp-*
