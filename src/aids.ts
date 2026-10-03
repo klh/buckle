@@ -8,13 +8,22 @@
 import { Database } from "bun:sqlite";
 
 /** The five declared keys; unknown keys are ignored (forward-compatible). */
-export type AidKey = "preseed" | "cache-align" | "compress" | "expand" | "off";
+export type AidKey =
+	| "preseed"
+	| "cache-align"
+	| "compress"
+	| "expand"
+	| "condense-in"
+	| "off";
 
 export interface AidsStanza {
 	preseed?: { domain: string; focus: string[] };
 	"cache-align"?: boolean;
 	compress?: boolean;
 	expand?: boolean;
+	/** W5 prompt pipeline IN: response-side condense (sideband, see
+	 *  pipeline.ts). Declared per request; the served bytes never change. */
+	"condense-in"?: boolean;
 	off: boolean;
 	unknown: string[];
 }
@@ -59,6 +68,10 @@ export function parseAids(raw: string | null | undefined): AidsStanza {
 				break;
 			case "expand":
 				out.expand = true;
+				break;
+			case "condense-in":
+				out["condense-in"] = true;
+				break;
 				break;
 			default:
 				out.unknown.push(p);

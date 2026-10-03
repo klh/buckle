@@ -197,13 +197,16 @@ export function aidsRollup(deps: AidsDeps, hours: number): Response {
 /** Wire-path aids: called on every proxied request (await it). No
  *  x-belt-aids header → zero touch (pass-through doctrine). The expand
  *  branch (W4) runs the intent expansion pre-routing when declared AND the
- *  policy gate is open — the expanded body is what rides OUT. */
+ *  policy gate is open — the expanded body is what rides OUT. Returns the
+ *  (possibly aligned) body plus whether W5 inbound condense was declared
+ *  (handled sideband on the response — applyWireAids itself never touches
+ *  it). */
 export async function applyWireAids(
 	deps: AidsDeps,
 	header: string | null,
 	body: AnyRec,
 	dialect: Dialect,
-): Promise<{ body: AnyRec; aligned: boolean }> {
+): Promise<{ body: AnyRec; aligned: boolean; condenseIn: boolean }> {
 	const stanza = parseAids(header);
 	if (stanza.unknown.length > 0) {
 		for (const u of stanza.unknown)
@@ -213,7 +216,7 @@ export async function applyWireAids(
 				skip_reason: "policy",
 			});
 	}
-	if (stanza.off) return { body, aligned: false };
+	if (stanza.off) return { body, aligned: false, condenseIn: false };
 	if (stanza.expand) {
 		// W4 intent expansion: the local direct tier expands the goal before
 		// routing; a missing expander is an honest policy skip (garnish law).
@@ -245,9 +248,15 @@ export async function applyWireAids(
 			decision: aligned ? "injected" : "skipped",
 			skip_reason: aligned ? null : "unsupported",
 		});
-		if (aligned?.body) return { body: aligned.body, aligned: true };
+		if (aligned?.body) {
+			return {
+				body: aligned.body,
+				aligned: true,
+				condenseIn: stanza["condense-in"] === true,
+			};
+		}
 	}
-	return { body, aligned: false };
+	return { body, aligned: false, condenseIn: stanza["condense-in"] === true };
 }
 
 /** The aids route table, dispatched from createApp. Unknown /aids/* paths

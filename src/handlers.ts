@@ -30,6 +30,8 @@ import { hintFromHeaders, type RouteHint } from "./hints.ts";
 import { keyIdFromAuth, type Ledger } from "./ledger.ts";
 import type { AidsPolicy } from "./policy.ts";
 import type { Preseeder } from "./preseed.ts";
+import { pipelineRoutes, type CondenseStore } from "./pipeline.ts";
+import { condenseInbound } from "./pipeline-wire.ts";
 import { type ExecuteResult, type Router, UpstreamError } from "./router.ts";
 import type { Servicemon } from "./servicemon.ts";
 import { SseSniffer } from "./sse.ts";
@@ -58,6 +60,9 @@ export interface AppDeps {
 	// W4 intent expansion — optional so bare deps (testDeps, dev) skip the
 	// expand aid honestly instead of failing the wire path.
 	expander?: Expander;
+	// W5 prompt pipeline IN: the condense sidestore (pipeline.ts). Optional —
+	// bare deps (testDeps, dev) skip honestly and the routes 404 (AppDeps law).
+	pipeline?: CondenseStore;
 	// W154 federation surface — present on hub-shaped deps (buildDeps);
 	// optional so bare deps (testDeps, dev) 404 honestly.
 	federation?: Federation;
@@ -158,6 +163,8 @@ interface Ctx {
 	tier: string;
 	t0: number;
 	sel?: RouteSelection;
+	/** W5: the request declared `condense-in` in its x-belt-aids stanza. */
+	condenseIn: boolean;
 }
 
 /** A refusal at the wire seam (bad hint, bad body): the denied audit row
@@ -227,6 +234,7 @@ async function proxy(
 		hint: null,
 		t0: 0,
 		tier: "",
+		condenseIn: false,
 	};
 	ctx.t0 = Date.now();
 	const hint = hintFromHeaders(req.headers);
@@ -247,6 +255,7 @@ async function proxy(
 		dialect,
 	);
 	body = wire.body;
+	ctx.condenseIn = wire.condenseIn;
 	ctx.group = model;
 	ctx.model = model;
 	ctx.hint = hint.hint;
@@ -415,6 +424,9 @@ async function jsonResponse(
 			ctx.dialect === "anthropic" ? usageFromAnthropic(u) : usageFromOpenAI(u);
 	}
 	record(deps, ctx, usage);
+	// W5 inbound condense: sidestore AFTER the ledger row; the response
+	// bytes above are untouched (byte identity).
+	condenseInbound(deps, ctx, parsed);
 	return new Response(raw, {
 		status: result.response.status,
 		headers: SSE_HEADERS(result.response.headers),
@@ -573,6 +585,8 @@ export function createApp(deps: AppDeps): App {
 		}
 		const aidsRouted = await aidsRoutes(deps, req, path);
 		if (aidsRouted) return aidsRouted;
+		const pipeRouted = await pipelineRoutes(deps, req, path);
+		if (pipeRouted) return pipeRouted;
 		if (method === "POST" && path === "/v1/chat/completions") {
 			return proxy(req, "openai", path, deps);
 		}

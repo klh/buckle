@@ -49,14 +49,20 @@ aids:
   compress:
     default: off
     max_prose_bytes: 1536
-  # W4 intent expansion (the W288 retarget): orchestrate-enhance declares
-  # `expand` and the user goal is expanded with an architectural-wants
-  # digest (fleet laws + repo conventions) by the LOCAL DIRECT tier — one
-  # candidate, no ladder walk, never a cloud row. DEFAULT-OFF until an
-  # operator flips it (an extra LLM hop must prove ROI first).
+  # W4 expand (W288 retarget): orchestrate-enhance declares `expand` — the
+  # user goal is expanded with an architectural-wants digest by the LOCAL
+  # DIRECT tier. DEFAULT-OFF until an operator flips it (an extra LLM hop
+  # must prove ROI first).
   expand:
     default: off
     group: local-swarm
     timeout_ms: 3000
     max_goal_chars: 4000
     max_digest_bytes: 2048
+  # W5 prompt pipeline IN: response-side condense. Sideband-only — the
+  # served bytes never change; the condensed variant + raw live by rid at
+  # GET /pipeline/in/<rid> (raw one click away). Declared per request via
+  # x-belt-aids: condense-in; `off` is the operator kill switch.
+  condense-in:
+    default: on
+    max_bytes: 262144

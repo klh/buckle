@@ -87,7 +87,9 @@ export function allowOf(path: string): string | null {
 	if (
 		path === "/aids/status" ||
 		path === "/aids/rollup" ||
-		path === "/aids/events"
+		path === "/aids/events" ||
+		path === "/pipeline/in" ||
+		/^\/pipeline\/in\/\S+$/.test(path)
 	)
 		return "GET, HEAD, OPTIONS";
 	if (path === "/v1/admin/keys" || path === "/v1/admin/teams")

@@ -50,12 +50,11 @@ export interface AidsPolicy {
 	};
 	"cache-align"?: { default?: "on" | "off" };
 	compress?: { default?: "on" | "off"; max_prose_bytes?: number };
-	// W4 intent expansion (the W288 retarget): orchestrate-enhance declares
-	// `expand` and the user goal is expanded with an architectural-wants
-	// digest (fleet laws + repo conventions) by the LOCAL DIRECT tier — one
-	// candidate, no ladder walk, never a cloud row. DEFAULT-OFF per the
-	// W137 economics law: an extra LLM hop proves ROI before operators
-	// flip it onto the request path.
+	// W4 expand (W288 retarget): orchestrate-enhance declares `expand` — the
+	// user goal is expanded with an architectural-wants digest (fleet laws +
+	// repo conventions) by the LOCAL DIRECT tier, one candidate, no ladder
+	// walk, never a cloud row. DEFAULT-OFF per the W137 economics law: an
+	// extra LLM hop proves ROI before operators flip it onto the path.
 	expand?: {
 		default?: "on" | "off";
 		group?: string; // the local direct tier; default local-swarm
@@ -63,6 +62,10 @@ export interface AidsPolicy {
 		max_goal_chars?: number;
 		max_digest_bytes?: number;
 	};
+	/** W5 prompt pipeline IN: the response-side condense is sideband-only
+	 *  (served bytes never change), so declarations are honored by default;
+	 *  `default: "off"` is the operator kill switch. */
+	"condense-in"?: { default?: "on" | "off"; max_bytes?: number };
 }
 
 interface PolicyDoc {
