@@ -81,7 +81,8 @@ export function allowOf(path: string): string | null {
 		path === "/v1/chat/completions" ||
 		path === "/v1/messages" ||
 		path === "/v1/messages/count_tokens" ||
-		path === "/aids/preseed"
+		path === "/aids/preseed" ||
+		path === "/repo-policy/check"
 	)
 		return "POST, OPTIONS";
 	if (

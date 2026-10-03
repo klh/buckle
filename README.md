@@ -51,6 +51,13 @@ flowchart LR
 - **Governance seams** — budgets, per-key/team ceilings, entitlement
   checks and federation hooks hang off the router core (see the suspenders
   design docs).
+- **Repo-policy gate (W7)** — hub-connected sessions check the repo in
+  view against `repo-policy.yaml` data rows (`{id, repoClass, detect,
+check, missingQuestion, policySource}`): silent when satisfied, one
+  actionable missing-question per found gap. `POST /repo-policy/check`
+  or `bun bin/repo-policy.ts <repo-root> [--resolve-facts]`. Internal
+  policy text stays in LOCAL-ONLY coord facts (`fact:finding.ikea-*`),
+  resolved only on the local owner-report path.
 
 ## Status
 

@@ -1,0 +1,44 @@
+# repo-policy.yaml — W7 repo-policy gate rows: policy as DATA. The engine
+# (src/repo-policy.ts) runs these against the repo in view; rows are
+# additive without code changes. Resolution order: BUCKLE_REPO_POLICY env →
+# runtime copy in ~/.claude/local-llm/ → this committed default.
+#
+# Row grammar (v1): detect = all conditions must hold (absent = every
+# repo); check = all must hold, first failure = one gap; conditions:
+#   {exists: p} {existsAny: [ps]} {grep: p, pattern} {grepAny: [ps], pattern}
+#   {httpGet: path, expect?, timeoutS?}  (needs a caller-supplied base_url;
+#     unreachable = honest skip, never a false gap)
+#
+# Laws: silent when satisfied — a satisfied row produces no prose, a gap
+# produces exactly one actionable missingQuestion to the owner. IKEA-
+# internal policy text NEVER commits: a row points at a LOCAL-ONLY coord
+# fact via policySource: "fact:finding.ikea-<topic>" (resolved only on the
+# local owner-report path, never fed to a model).
+version: 1
+
+rows:
+  # Row one (owner brief): a repo that serves HTTP declares a liveness
+  # endpoint in its server entry.
+  - id: api-health-endpoint
+    repoClass: api
+    detect:
+      - existsAny: [src/server.ts, server.ts, src/server/index.ts, src/main.ts, src/app.ts]
+    check:
+      - grepAny: [src/server.ts, server.ts, src/server/index.ts, src/main.ts, src/app.ts]
+        pattern: "/health|/healthz|/status"
+    missingQuestion: "the server entry registers no /health-style route — which liveness endpoint does this API serve?"
+    policySource: commit
+
+  - id: repo-license
+    repoClass: any
+    check:
+      - existsAny: [LICENSE, LICENSE.md, LICENSE.txt, LICENSE.html, COPYING, COPYING.md, COPYING.LESSER, LEGAL.txt]
+    missingQuestion: "no LICENSE file at the repo root — what license governs this code?"
+    policySource: commit
+
+  - id: repo-ci
+    repoClass: any
+    check:
+      - existsAny: [.github/workflows, .gitlab-ci.yml, .circleci/config.yml, Jenkinsfile, bitbucket-pipelines.yml, .drone.yml]
+    missingQuestion: "no CI config anywhere — where does CI for this repo live?"
+    policySource: commit

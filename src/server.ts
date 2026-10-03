@@ -20,6 +20,7 @@ import { Ledger } from "./ledger.ts";
 import { loadGatewayPolicy, loadPrefs } from "./policy.ts";
 import { poolWarm, prewarm } from "./pool-warm.ts";
 import { Preseeder } from "./preseed.ts";
+import { loadRepoPolicies } from "./repo-policy.ts";
 import { Router, type RouterMetrics } from "./router.ts";
 import { servicemon } from "./servicemon.ts";
 import type { Dialect } from "./upstreams.ts";
@@ -41,6 +42,9 @@ export interface ServerOpts {
 	policyPath?: string;
 	upstreamsPath?: string;
 	prefsPath?: string;
+	/** W7 repo-policy gate: explicit path for the row file; defaults chain
+	 *  BUCKLE_REPO_POLICY → local-llm dir → the committed repo-policy.yaml. */
+	repoPolicyPath?: string;
 	/** W193: secrets home for the manifest-signing key (hub-only key law).
 	 *  Defaults: BUCKLE_SECRETS_HOME env, else ~/.claude/local-llm. */
 	secretsHome?: string;
@@ -174,6 +178,9 @@ export function buildDeps(
 				join(process.env.HOME ?? homedir(), ".claude", "local-llm"),
 		),
 	});
+	// W7 repo-policy gate: the row file loads once at boot; absent file =
+	// zero rows = engine inert (a fresh spoke without rows is valid).
+	const repoPolicy = loadRepoPolicies(opts.repoPolicyPath);
 	return {
 		router,
 		ledger,
@@ -181,6 +188,7 @@ export function buildDeps(
 		preseeder,
 		aidsPolicy,
 		expander,
+		repoPolicy: repoPolicy.rows,
 		sm,
 		pool,
 		decide,

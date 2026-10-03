@@ -9,6 +9,8 @@
 
 import type { AidsLedger } from "./aids.ts";
 import { aidsRoutes, applyWireAids } from "./aids-routes.ts";
+import type { RepoPolicyRow } from "./repo-policy.ts";
+import { repoPolicyRoutes } from "./repo-policy-routes.ts";
 import type { CandidateRow, CandidateTable } from "./candidates.ts";
 import type { Expander } from "./expand.ts";
 import {
@@ -66,6 +68,9 @@ export interface AppDeps {
 	// W154 federation surface — present on hub-shaped deps (buildDeps);
 	// optional so bare deps (testDeps, dev) 404 honestly.
 	federation?: Federation;
+	// W7 repo-policy gate: the loaded rows (absent/empty = engine inert);
+	// the route 404s honestly when unwired.
+	repoPolicy?: RepoPolicyRow[];
 }
 
 interface App {
@@ -587,6 +592,12 @@ export function createApp(deps: AppDeps): App {
 		if (aidsRouted) return aidsRouted;
 		const pipeRouted = await pipelineRoutes(deps, req, path);
 		if (pipeRouted) return pipeRouted;
+		const rpRouted = await repoPolicyRoutes(
+			{ rows: deps.repoPolicy ?? [], sm: deps.sm },
+			req,
+			path,
+		);
+		if (rpRouted) return rpRouted;
 		if (method === "POST" && path === "/v1/chat/completions") {
 			return proxy(req, "openai", path, deps);
 		}
