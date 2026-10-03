@@ -203,8 +203,22 @@ export function startServer(
 	gov.budgets.startFlushTimer();
 	const gated = authOn ? gov.gate(app.fetch) : app.fetch;
 	const inner = deps.sm.fetch(gated);
+	// W162.1 hub bind: a spoke (the common case) never leaves opts.hostname/
+	// BUCKLE_BIND unset and stays 127.0.0.1 — zero change in behavior. A hub
+	// deployment (owner directive 2026-10-03: real multi-machine reach, not
+	// a cosmetic label) opts in explicitly. Non-loopback with the gate off
+	// would serve ungated LLM routing to the whole LAN/WAN — refuse to boot
+	// rather than silently expose it (same "never silent" law as 4100).
+	const hostname = opts.hostname ?? process.env.BUCKLE_BIND ?? "127.0.0.1";
+	if (hostname !== "127.0.0.1" && !authOn) {
+		throw new Error(
+			`BUCKLE_BIND=${hostname} refused — a non-loopback bind requires the ` +
+				"governance gate (BUCKLE_AUTH=on, the default); set it or stay on " +
+				"127.0.0.1. /status and /health remain public either way.",
+		);
+	}
 	const server = Bun.serve({
-		hostname: opts.hostname ?? "127.0.0.1",
+		hostname,
 		port,
 		// W199.2: the explicit body cap — over-cap requests get Bun's 413 and
 		// never reach the governance gate, the ledger or the pool.
@@ -219,9 +233,9 @@ export function startServer(
 /** Entry: bind the shadow port, log the guard. */
 export function main(): void {
 	const port = resolvePort();
-	startServer({ port });
+	const server = startServer({ port });
 	console.log(
-		`buckle: shadow router on http://127.0.0.1:${port} (4100 refused by design)`,
+		`buckle: shadow router on http://${server.hostname}:${port} (4100 refused by design)`,
 	);
 }
 
