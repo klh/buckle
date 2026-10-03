@@ -61,6 +61,27 @@ export const anthropicRoot = (baseUrl: string): string =>
 export const expandPath = (p: string): string =>
 	p === "~" || p.startsWith("~/") ? join(homedir(), p.slice(1)) : p;
 
+/** W1 lane attribution (caveman adopt 1): the base-URL union for one lane —
+ *  every base-URL var an executor might honor points at the front's
+ *  `/w/<slug>` attribution prefix, so the board gets executor↔model↔lane
+ *  joins from the path alone. Dialect asymmetry per agent-recipes-draft.md:
+ *  openai-family bases include /v1 (clients append /chat/completions);
+ *  anthropic/gemini roots don't (clients append /v1/messages). The dispatch
+ *  side calls this with the buckle front, e.g.
+ *  `laneEnv(sid, "http://127.0.0.1:4101/v1")`. Slugs: [A-Za-z0-9][A-Za-z0-9._-]*. */
+export const laneEnv = (
+	slug: string,
+	baseUrl: string = DEFAULT_BASE_URL,
+): Record<string, string> => {
+	const laneRoot = `${anthropicRoot(baseUrl)}/w/${slug}`;
+	return {
+		ANTHROPIC_BASE_URL: laneRoot,
+		OPENAI_BASE_URL: `${laneRoot}/v1`,
+		OPENAI_API_BASE: `${laneRoot}/v1`,
+		GOOGLE_GEMINI_BASE_URL: laneRoot,
+	};
+};
+
 /** The seed table. `baseUrl` is the openai-dialect base (…/v1); anthropic
  *  entries derive their root from it. */
 export const agentRecipes = (

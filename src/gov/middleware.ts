@@ -9,6 +9,7 @@ import { Database } from "bun:sqlite";
 import { timingSafeEqual } from "node:crypto";
 import {
 	allowOf,
+	lanePrefixOf,
 	options204,
 	problem,
 	type RateLimitView,
@@ -98,6 +99,7 @@ export class Governance {
 			rid: p.rid,
 			ts,
 			actor: p.actor,
+			lane: lanePrefixOf(p.route).lane,
 			dialect: p.dialect,
 			hint: "",
 			candidates_seen: 0,
@@ -529,7 +531,10 @@ export function scopeNeeded(
 }
 
 function dialectOf(path: string): string {
-	return path.startsWith("/v1/messages") ? "anthropic" : "openai";
+	// lane-prefixed ingress keeps its dialect on gate denial rows (W1)
+	return lanePrefixOf(path).path.startsWith("/v1/messages")
+		? "anthropic"
+		: "openai";
 }
 
 function actorOf(req: Request): string {

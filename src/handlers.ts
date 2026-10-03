@@ -15,6 +15,7 @@ import type { CandidateRow, CandidateTable } from "./candidates.ts";
 import type { Expander } from "./expand.ts";
 import {
 	allowOf,
+	lanePrefixOf,
 	methodNotAllowed,
 	options204,
 	PROBLEM_SLUGS,
@@ -127,6 +128,7 @@ function stamped(
 		payload.latency_class = latencyClass(route.row.estimate_ms);
 	}
 	if (ctx.tier) payload.tier = ctx.tier;
+	if (ctx.lane) payload.lane = ctx.lane;
 	const hs = HEADERS_JSON({
 		"x-belt-rid": ctx.rid,
 		"x-belt-route": JSON.stringify(payload),
@@ -163,6 +165,8 @@ interface Ctx {
 	model: string;
 	dialect: Dialect;
 	rid: string;
+	/** W1 lane attribution: the /w/<slug> slug ('' on bare paths). */
+	lane: string;
 	hintRaw: string;
 	hint: RouteHint | null;
 	tier: string;
@@ -186,6 +190,7 @@ function deny(
 		rid: ctx.rid,
 		ts: new Date().toISOString(),
 		actor: ctx.key,
+		lane: ctx.lane,
 		dialect: ctx.dialect,
 		hint: ctx.hintRaw,
 		candidates_seen: 0,
@@ -228,6 +233,7 @@ async function proxy(
 	dialect: Dialect,
 	path: string,
 	deps: AppDeps,
+	lane = "",
 ): Promise<Response> {
 	const ctx: Ctx = {
 		key: keyIdFromAuth(req.headers.get("authorization")),
@@ -235,6 +241,7 @@ async function proxy(
 		model: "",
 		dialect,
 		rid: newRid(),
+		lane,
 		hintRaw: "",
 		hint: null,
 		t0: 0,
@@ -295,6 +302,7 @@ async function runExecute(
 		rid: ctx.rid,
 		ts: new Date().toISOString(),
 		actor: ctx.key,
+		lane: ctx.lane,
 		dialect: ctx.dialect,
 		hint: ctx.hintRaw,
 		candidates_seen: sel.seen,
@@ -561,6 +569,35 @@ export function createApp(deps: AppDeps): App {
 		if (method === "OPTIONS") {
 			const allow = allowOf(path);
 			if (allow !== null) return options204(allow);
+		}
+		// W1 lane attribution (caveman adopt 1): /w/<slug> prefixes the LLM
+		// ingress + /v1/models only. The slug lands in the audit row + the
+		// x-belt-route header; the upstream sees the bare path. Other
+		// surfaces (federation/admin/aids) stay unprefixed — a lane prefix
+		// never widens surface.
+		const laneRoute = lanePrefixOf(path);
+		if (laneRoute.lane !== "") {
+			const inner = laneRoute.path;
+			const ingress =
+				inner === "/v1/chat/completions" ||
+				inner === "/v1/messages" ||
+				inner === "/v1/messages/count_tokens" ||
+				inner === "/v1/models";
+			if (method === "OPTIONS" && ingress)
+				return options204(allowOf(inner) ?? "OPTIONS");
+			if (method === "GET" && inner === "/v1/models") return models(deps);
+			if (method === "POST" && inner === "/v1/chat/completions")
+				return proxy(req, "openai", inner, deps, laneRoute.lane);
+			if (method === "POST" && inner === "/v1/messages/count_tokens")
+				return proxy(req, "anthropic", inner, deps, laneRoute.lane);
+			if (method === "POST" && inner === "/v1/messages")
+				return proxy(req, "anthropic", inner, deps, laneRoute.lane);
+			if (ingress) return methodNotAllowed(inner);
+			return problem({
+				status: 404,
+				code: "buckle.no_route",
+				why: `no route: ${method} ${path}`,
+			});
 		}
 		if (method === "GET" && path === "/v1/models") return models(deps);
 		if (method === "GET" && path === "/health") {

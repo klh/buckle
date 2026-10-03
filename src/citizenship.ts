@@ -113,6 +113,17 @@ export function options204(allow: string): Response {
 	return new Response(null, { status: 204, headers: { allow } });
 }
 
+/** W1 lane attribution: the optional `/w/<slug>` prefix on the LLM ingress
+ *  (caveman adopt 1) — the per-lane attribution axis. Slug grammar is
+ *  deliberately narrow; anything else is not a lane prefix and routes as
+ *  itself (404 if it matches nothing). The prefix is buckle-front-only:
+ *  stripped before any upstream dispatch, kept in the audit row. */
+export function lanePrefixOf(path: string): { lane: string; path: string } {
+	const m = /^\/w\/([A-Za-z0-9][A-Za-z0-9._-]*)(\/.+)$/.exec(path);
+	if (m === null) return { lane: "", path };
+	return { lane: m[1] ?? "", path: m[2] ?? "" };
+}
+
 /** Known path, wrong method → 405 + Allow, problem+json body. */
 export function methodNotAllowed(path: string): Response {
 	const allow = allowOf(path) ?? "OPTIONS";

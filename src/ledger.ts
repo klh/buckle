@@ -21,6 +21,9 @@ export interface RouteAuditDecision {
 	rid: string;
 	ts: string;
 	actor: string;
+	/** W1 per-lane attribution: the /w/<slug> slug when the request rode a
+	 *  lane-prefixed ingress path; '' for bare paths. */
+	lane: string;
 	dialect: string;
 	hint: string;
 	candidates_seen: number;
@@ -46,11 +49,11 @@ export interface RouteAuditOutcome {
 
 const INSERT_AUDIT = `
 INSERT INTO route_audit (
-  rid, ts, actor, dialect, hint,
+  rid, ts, actor, lane, dialect, hint,
   candidates_seen, candidates_top,
   target_kind, target_host, target_port, target_model,
   decision, latency_class, tier, allow_cloud, error_code, why
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 const SCHEMA = `
@@ -70,6 +73,7 @@ CREATE TABLE IF NOT EXISTS route_audit (
   rid TEXT PRIMARY KEY,
   ts TEXT NOT NULL,
   actor TEXT NOT NULL DEFAULT '',
+  lane TEXT NOT NULL DEFAULT '',
   dialect TEXT NOT NULL DEFAULT '',
   hint TEXT NOT NULL DEFAULT '',
   candidates_seen INTEGER NOT NULL DEFAULT 0,
@@ -142,6 +146,16 @@ export class Ledger {
 		this.db = new Database(path, { create: true });
 		this.db.exec("PRAGMA journal_mode = WAL");
 		this.db.exec(SCHEMA);
+		// W1: pre-lane databases keep their table (CREATE IF NOT EXISTS won't
+		// add the column) — ALTER it in; a duplicate column just means the
+		// schema is already current.
+		try {
+			this.db.exec(
+				"ALTER TABLE route_audit ADD COLUMN lane TEXT NOT NULL DEFAULT ''",
+			);
+		} catch {
+			// column exists — schema current
+		}
 		this.upsert = this.db.query(UPSERT);
 		this.flushMs = opts.flushMs ?? 5000;
 		this.flushRows = opts.flushRows ?? 256;
@@ -260,6 +274,7 @@ export class Ledger {
 				row.rid,
 				row.ts,
 				row.actor,
+				row.lane,
 				row.dialect,
 				row.hint,
 				row.candidates_seen,
