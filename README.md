@@ -1,5 +1,8 @@
 # buckle
 
+> Part of the klh fleet — see [ECOSYSTEM.md](ECOSYSTEM.md) for the full
+> cross-repo architecture map (speedy/suspenders/buckle/belt/klh-local).
+
 LLM gateway: two-dialect transport + governance in one Bun/TypeScript
 process. The LiteLLM-replacement serving layer of the
 [klh agent stack](https://github.com/klh/suspenders) — belt routes,
