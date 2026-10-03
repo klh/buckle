@@ -24,6 +24,16 @@ export interface AgentRecipe {
 			value: string;
 		};
 	};
+	/** W2 caveman adopt 2: ephemeral config-home injection for lanes — the
+	 *  rendered config lands in a temp home (dir 0700, file 0600) pointed at
+	 *  via `configHomeEnv`; the user's real config is never mutated and the
+	 *  persistent enable stays the onboard configEdit path above. Rendered
+	 *  configs reference secrets by env name only, never values. */
+	ephemeral?: {
+		configHomeEnv: string;
+		file: string;
+		render: (baseUrl: string, model: string) => string;
+	};
 	probe:
 		| { kind: "cli"; argv: string[]; expect: string }
 		| { kind: "http"; url: string };
@@ -89,13 +99,32 @@ export const agentRecipes = (
 					"[model_providers.buckle]",
 					`name = "buckle"`,
 					`base_url = "${baseUrl}"`,
-					`wire_api = "chat"`,
+					`env_key = "LITELLM_KEY"`,
+					`wire_api = "responses"`,
 				].join("\n")}\n`,
 			},
 		},
+		// benchmarks.md codex row (PASS 2026-10-03): temp CODEX_HOME +
+		// wire_api="responses" + env_key reaches :4100. codex >=0.158
+		// hard-errors on wire_api="chat" — responses is the only wire.
+		ephemeral: {
+			configHomeEnv: "CODEX_HOME",
+			file: "config.toml",
+			render: (baseUrl, model) =>
+				`${[
+					`model = "${model}"`,
+					`model_provider = "buckle"`,
+					"",
+					"[model_providers.buckle]",
+					`name = "buckle"`,
+					`base_url = "${baseUrl}"`,
+					`env_key = "LITELLM_KEY"`,
+					`wire_api = "responses"`,
+				].join("\n")}\n`,
+		},
 		probe: { kind: "http", url: `${baseUrl}/models` },
 		notes:
-			"provider block in ~/.codex/config.toml + OPENAI_BASE_URL for the env-only path",
+			"ephemeral lane path = temp CODEX_HOME (bin/lane-wrap.ts); persistent enable = the configEdit block (responses wire only since codex 0.158)",
 	},
 	{
 		id: "copilot",
