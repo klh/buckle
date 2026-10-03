@@ -55,6 +55,7 @@ describe("Ledger durability", () => {
 			rid: "r1",
 			ts: "2026-10-01T00:00:00.000Z",
 			actor: "a",
+			lane: "",
 			dialect: "openai",
 			hint: "",
 			candidates_seen: 1,
