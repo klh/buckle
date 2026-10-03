@@ -12,12 +12,12 @@ per class, never blended; one lever at a time.
 
 ## Wire/adapter probes (verified 2026-10-02)
 
-| Probe                                 | Path                                   | Result                                                                   |
-| ------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------ |
-| copilot BYOK openai-wire → local tier | `COPILOT_PROVIDER_*` → :8903 `/v1`     | PASS — answered `PROOF-BYOK-LOCAL`, zero AI credits, no GitHub auth      |
-| claude CLI → belt router              | `ANTHROPIC_BASE_URL=:4000` + model pin | PASS — daily lanes run this                                              |
-| copilot BYOK anthropic-wire → :4000   | `COPILOT_PROVIDER_TYPE=anthropic`      | FAIL — silent 1s abort; diagnosis pending (W223)                         |
-| codex → :4100 responses wire          | CODEX_HOME `model_providers`           | OPEN — codex ≥0.158 is Responses-only; chat tiers unreachable from codex |
+| Probe                                 | Path                                   | Result                                                                                                                                                            |
+| ------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| copilot BYOK openai-wire → local tier | `COPILOT_PROVIDER_*` → :8903 `/v1`     | PASS — answered `PROOF-BYOK-LOCAL`, zero AI credits, no GitHub auth                                                                                               |
+| claude CLI → belt router              | `ANTHROPIC_BASE_URL=:4000` + model pin | PASS — daily lanes run this                                                                                                                                       |
+| copilot BYOK anthropic-wire → :4000   | `COPILOT_PROVIDER_TYPE=anthropic`      | FAIL — silent 1s abort; diagnosis pending (W223)                                                                                                                  |
+| codex → :4100 responses wire          | CODEX_HOME `model_providers`           | PASS — temp CODEX_HOME + `wire_api="responses"` + `env_key=LITELLM_KEY`: `ENGINE-REACHABLE` (2026-10-03; ~12.5k harness tokens on a 1-line task = codex overhead) |
 
 ## Engine (W219.1 litellm-as-engine) — pending acceptance
 
