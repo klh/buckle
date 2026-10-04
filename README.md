@@ -3,8 +3,10 @@
 > Part of the klh fleet — see [ECOSYSTEM.md](ECOSYSTEM.md) for the full
 > cross-repo architecture map (speedy/suspenders/buckle/belt/klh-local).
 
-LLM gateway: dual-dialect pass-through + governance in one Bun/TypeScript
-process. The LiteLLM-replacement serving layer of the
+LLM gateway: multi-provider serving + governance in one Bun/TypeScript
+process. Two client wire dialects (OpenAI, Anthropic) in front of the
+LiteLLM-internal engine (W219.1) and the 100+ provider catalog
+(W150) — the serving layer of the
 [klh agent stack](https://github.com/klh/suspenders) — belt routes,
 buckle serves.
 
@@ -33,11 +35,12 @@ flowchart LR
 
 ## What it does
 
-- **Dual-dialect pass-through; cross-dialect failover opt-in** — OpenAI
-  `/v1/chat/completions` and Anthropic `/v1/messages`, each routed to
-  upstreams of its own dialect with SSE pass-through and a usage-only tee.
-  `BUCKLE_CROSS_DIALECT=on` (default off) lets a ladder rung fail over to
-  the other dialect through the tool/stream transforms
+- **Two client wires, many providers** — OpenAI `/v1/chat/completions`
+  and Anthropic `/v1/messages` are the client-facing dialects; behind
+  them the LiteLLM-internal engine routes to 100+ providers as data rows
+  (`upstreams.yaml` + the W150 catalog), not two hardwired backends.
+  `BUCKLE_CROSS_DIALECT=on` (default off) lets a ladder rung fail over
+  between wire dialects through the tool/stream transforms
   (`src/bridge.ts`): anthropic client → openai upstream (JSON +
   streaming), openai client → anthropic upstream (JSON only).
 - **Upstreams are data, not code** — `upstreams.yaml` group rows
