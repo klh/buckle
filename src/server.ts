@@ -257,6 +257,15 @@ export function main(): void {
 	// BUCKLE_ROOT_KEY from runtime env seeds the bootstrap principal; mint
 	// real bksk_ keys via /v1/admin/keys and retire the root when done.
 	const rootKey = process.env.BUCKLE_ROOT_KEY;
+	// health law: the served process regenerates status.json from its own
+	// event loop; the hub health sidecar judges by file age. Hub-only (the
+	// helper rides the suspenders volume); silent outside the hub.
+	const hb = process.env.HEARTBEAT_FILE;
+	if (hb) {
+		void import("/src/suspenders/deploy/healthcheck/heartbeat.ts")
+			.then((m) => m.startHeartbeat(hb))
+			.catch(() => {});
+	}
 	const server = startServer({
 		port,
 		...(rootKey ? { auth: { rootKey } } : {}),
