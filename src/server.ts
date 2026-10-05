@@ -251,9 +251,19 @@ export function startServer(
 /** Entry: bind the shadow port, log the guard. */
 export function main(): void {
 	const port = resolvePort();
-	const server = startServer({ port });
+	// break-glass root credential (2026-10-05): hub deploys run the governance
+	// gate ON; without a root key NOTHING can authenticate or mint — every
+	// request 401s "unknown credential type" (the fleet-wide lane death).
+	// BUCKLE_ROOT_KEY from runtime env seeds the bootstrap principal; mint
+	// real bksk_ keys via /v1/admin/keys and retire the root when done.
+	const rootKey = process.env.BUCKLE_ROOT_KEY;
+	const server = startServer({
+		port,
+		...(rootKey ? { auth: { rootKey } } : {}),
+	});
 	console.log(
-		`buckle: shadow router on http://${server.hostname}:${port} (4100 refused by design)`,
+		`buckle: shadow router on http://${server.hostname}:${port}` +
+			` (4100 refused by design${rootKey ? ", root-keyed" : ", NO ROOT KEY — mint nothing"})`,
 	);
 }
 
